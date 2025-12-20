@@ -652,20 +652,37 @@ public class MainFrame extends JFrame {
                 } catch (InterruptedException ignored) {
                 }
 
-                if (peerDiscovery != null && messageHandler.getConnectionCount() == 0) {
-                    System.out.println("[MainFrame] Join mode: no TCP connections for room=" + roomId
-                            + " after wait, showing error dialog.");
-                    SwingUtilities.invokeLater(() -> {
-                        JOptionPane.showMessageDialog(this,
-                                "Không tìm thấy phòng \"" + roomId + "\" với mật khẩu đã nhập.\n" +
-                                        "Hãy kiểm tra lại room code và mật khẩu, hoặc chọn Create room.",
-                                "Room not found",
-                                JOptionPane.ERROR_MESSAGE);
-                        // Version nhẹ: không tắt hẳn app, chỉ đóng frame hiện tại
-                        // và mở lại MainFrame để hiện lại StartupDialog.
-                        dispose();
-                        new MainFrame();
-                    });
+                if (peerDiscovery != null) {
+                    int discoveredCount = peerDiscovery.getDiscoveredPeers().size();
+                    int connectionCount = messageHandler.getConnectionCount();
+                    System.out.println("[MainFrame] Join mode check: discoveredPeers=" + discoveredCount
+                            + ", connectionCount=" + connectionCount);
+
+                    if (connectionCount == 0) {
+                        if (discoveredCount == 0) {
+                            System.out.println("[MainFrame] Join mode: no peers discovered via UDP for room=" + roomId
+                                    + ". Possible issues: firewall blocking UDP broadcast, host not running, or room/password mismatch.");
+                        } else {
+                            System.out.println("[MainFrame] Join mode: found " + discoveredCount
+                                    + " peer(s) via UDP but TCP connection failed. Check firewall for TCP ports.");
+                        }
+                        SwingUtilities.invokeLater(() -> {
+                            String message = "Không tìm thấy phòng \"" + roomId + "\" với mật khẩu đã nhập.\n";
+                            if (discoveredCount == 0) {
+                                message += "\nGợi ý:\n- Kiểm tra firewall có chặn UDP port 55556 không\n";
+                                message += "- Đảm bảo máy host đã chạy và chọn Create room\n";
+                                message += "- Kiểm tra cả 2 máy cùng mạng LAN";
+                            } else {
+                                message += "\nĐã tìm thấy " + discoveredCount + " peer nhưng không kết nối được TCP.\n";
+                                message += "Kiểm tra firewall có chặn TCP ports không.";
+                            }
+                            JOptionPane.showMessageDialog(this, message,
+                                    "Room not found",
+                                    JOptionPane.ERROR_MESSAGE);
+                            dispose();
+                            new MainFrame();
+                        });
+                    }
                 }
             }, "JoinRoomValidator").start();
         }

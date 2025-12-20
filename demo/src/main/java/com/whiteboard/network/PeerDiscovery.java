@@ -7,7 +7,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 
 public class PeerDiscovery {
-    private static final String BROADCAST_ADDRESS = "172.26.21.185";
+    private static final String BROADCAST_ADDRESS = "192.168.1.99";
     private static final int BROADCAST_PORT = 55556;
 
     private final String peerId;
@@ -85,6 +85,8 @@ public class PeerDiscovery {
             try {
                 socket = new DatagramSocket(BROADCAST_PORT);
                 socket.setBroadcast(true);
+                System.out.println("[PeerDiscovery] Started listening on UDP port " + BROADCAST_PORT
+                        + " for room=" + (roomId == null ? "" : roomId));
             } catch (BindException be) {
                 // Trên một máy chỉ cần một tiến trình listen UDP; các tiến trình khác vẫn có
                 // thể broadcast.
@@ -99,6 +101,9 @@ public class PeerDiscovery {
                 try {
                     DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
                     socket.receive(packet);
+                    System.out
+                            .println("[PeerDiscovery] Received UDP packet from " + packet.getAddress().getHostAddress()
+                                    + ":" + packet.getPort() + ", length=" + packet.getLength());
 
                     String data = new String(packet.getData(), 0, packet.getLength());
                     String[] parts = data.split("\\|");
