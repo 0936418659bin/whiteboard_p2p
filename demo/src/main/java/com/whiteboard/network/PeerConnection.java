@@ -57,14 +57,29 @@ public class PeerConnection {
                             messageHandler.accept(message);
                         }
                     }
+                } catch (java.io.InvalidClassException e) {
+                    // Lỗi serialVersionUID không khớp - không disconnect, chỉ log và skip message này
+                    System.err.println("[PeerConnection] InvalidClassException from peer " + peerId
+                            + ": " + e.getMessage() + " - skipping message. "
+                            + "Có thể do version code khác nhau giữa 2 máy.");
+                    // Tiếp tục đọc message tiếp theo thay vì disconnect
+                    continue;
                 } catch (EOFException e) {
+                    // End of stream - connection đóng bình thường
                     break;
+                } catch (ClassNotFoundException e) {
+                    System.err.println("[PeerConnection] ClassNotFoundException from peer " + peerId
+                            + ": " + e.getMessage() + " - skipping message");
+                    continue; // Skip message này, tiếp tục đọc
                 }
             }
         } catch (SocketException e) {
-            // Connection closed
-        } catch (IOException | ClassNotFoundException e) {
-            System.err.println("Error reading from peer " + peerId + ": " + e.getMessage());
+            // Connection closed bình thường
+            System.out.println("[PeerConnection] Socket closed for peer " + peerId);
+        } catch (IOException e) {
+            if (isConnected) {
+                System.err.println("[PeerConnection] IOException reading from peer " + peerId + ": " + e.getMessage());
+            }
         } finally {
             disconnect();
         }

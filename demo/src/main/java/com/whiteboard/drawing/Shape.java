@@ -6,6 +6,8 @@ import java.util.ArrayList;
 import java.util.List;
 
 public class Shape implements Serializable, Cloneable {
+    private static final long serialVersionUID = 1L; // Cố định để đảm bảo compatibility giữa các máy
+    
     public enum ShapeType {
         POINT, LINE, RECTANGLE, CIRCLE, ELLIPSE, FREE_DRAW, TEXT,
         POLYGON, STAR, ARROW, CURVE, FILL
