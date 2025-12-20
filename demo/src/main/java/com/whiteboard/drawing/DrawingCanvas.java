@@ -9,6 +9,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
+import javax.swing.Timer;
 
 public class DrawingCanvas extends JPanel {
     private DrawingHistory history;
@@ -29,6 +30,9 @@ public class DrawingCanvas extends JPanel {
     private int freeDrawPointsSinceBroadcast;
     private int lastMouseX, lastMouseY;
     private final Map<String, Shape> remoteStrokeMap = new HashMap<>();
+    // Debounce repaint cho remote updates để giảm lag
+    private Timer repaintTimer;
+    private volatile boolean pendingRepaint = false;
 
     public DrawingCanvas(String peerId) {
         this.peerId = peerId;
@@ -118,6 +122,19 @@ public class DrawingCanvas extends JPanel {
         });
 
         setupKeyboardShortcuts();
+
+        // Cấu hình tooltip hiển thị sau ~2s khi hover lên nét vẽ (thông tin peer)
+        javax.swing.ToolTipManager.sharedInstance().setInitialDelay(2000);
+        javax.swing.ToolTipManager.sharedInstance().setDismissDelay(4000);
+
+        // Timer để debounce repaint khi nhận nhiều remote updates liên tiếp
+        repaintTimer = new Timer(16, e -> { // ~60fps
+            if (pendingRepaint) {
+                pendingRepaint = false;
+                repaint();
+            }
+        });
+        repaintTimer.setRepeats(false);
     }
 
     private void setupKeyboardShortcuts() {
@@ -200,6 +217,36 @@ public class DrawingCanvas extends JPanel {
         }
 
         if (e.getButton() == MouseEvent.BUTTON1) {
+            // Text tool: click -> hỏi text, tạo shape ngay, không cần drag
+            if (tool.getCurrentTool() == DrawingTool.Tool.TEXT) {
+                // Cửa sổ nhập text xuất hiện giữa màn hình
+                String text = JOptionPane.showInputDialog(null, "Enter text:", "Add Text",
+                        JOptionPane.PLAIN_MESSAGE);
+                if (text != null && !text.trim().isEmpty()) {
+                    text = text.trim();
+                    Shape textShape = new Shape(Shape.ShapeType.TEXT, canvasX, canvasY,
+                            canvasX, canvasY, tool.getCurrentColor(), tool.getStrokeWidth(), peerId);
+                    textShape.text = text;
+                    // Sao chép thông tin font từ TextManager (giống các whiteboard khác)
+                    Font f = textManager.getFont();
+                    textShape.fontName = f.getFamily();
+                    textShape.fontSize = f.getSize();
+                    textShape.fontStyle = f.getStyle();
+                    switch (textManager.getTextAlign()) {
+                        case CENTER -> textShape.textAlign = 1;
+                        case RIGHT -> textShape.textAlign = 2;
+                        default -> textShape.textAlign = 0;
+                    }
+                    layerManager.addShapeToActiveLayer(textShape);
+                    history.addShape(textShape);
+                    if (onShapeDrawn != null) {
+                        onShapeDrawn.accept(textShape.clone());
+                    }
+                    repaint();
+                }
+                return;
+            }
+
             isDrawing = true;
             freeDrawPoints.clear();
             freeDrawPointsSinceBroadcast = 0;
@@ -246,9 +293,14 @@ public class DrawingCanvas extends JPanel {
             // cập nhật đường vẽ tự do để hiển thị realtime trên canvas local
             currentShape.freeDrawPoints = new ArrayList<>(freeDrawPoints);
 
-            // PENCIL gửi realtime 100% cho peer khác, ERASER không cần realtime
+            // PENCIL: gửi realtime nhưng được "throttle" để tránh spam mạng và lag bên peer
             if (tool.getCurrentTool() == DrawingTool.Tool.PENCIL && onShapeDrawn != null) {
-                onShapeDrawn.accept(currentShape.clone());
+                freeDrawPointsSinceBroadcast++;
+                // Giảm threshold xuống 2 điểm để mượt hơn khi remote xem
+                if (freeDrawPointsSinceBroadcast >= 2) {
+                    onShapeDrawn.accept(currentShape.clone());
+                    freeDrawPointsSinceBroadcast = 0;
+                }
             }
         } else {
             // Các tool khác (LINE, RECT, CIRCLE, v.v.) chỉ cập nhật local preview,
@@ -401,6 +453,26 @@ public class DrawingCanvas extends JPanel {
         }
     }
 
+    /**
+     * Undo theo peer: xoá nét vẽ gần nhất của peerId (dùng cho sync mạng).
+     */
+    public void undoForPeer(String targetPeerId) {
+        if (targetPeerId == null) return;
+        java.util.List<LayerManager.Layer> layers = layerManager.getAllLayers();
+        for (int li = layers.size() - 1; li >= 0; li--) {
+            LayerManager.Layer layer = layers.get(li);
+            java.util.List<Shape> shapes = layer.shapes;
+            for (int si = shapes.size() - 1; si >= 0; si--) {
+                Shape s = shapes.get(si);
+                if (s != null && targetPeerId.equals(s.peerId)) {
+                    shapes.remove(si);
+                    repaint();
+                    return;
+                }
+            }
+        }
+    }
+
     public void redo() {
         Shape redoShape = history.redo();
         if (redoShape != null) {
@@ -422,14 +494,34 @@ public class DrawingCanvas extends JPanel {
         String peer = shape.peerId == null ? "" : shape.peerId;
         String key = peer + ":" + shape.timestamp;
 
-        Shape old = remoteStrokeMap.get(key);
-        if (old != null) {
-            layerManager.removeShapeFromActiveLayer(old);
+        Shape existing = remoteStrokeMap.get(key);
+        if (existing == null) {
+            // lần đầu nhận stroke này: thêm vào layer và map
+            layerManager.addShapeToActiveLayer(shape);
+            remoteStrokeMap.put(key, shape);
+        } else {
+            // cập nhật in-place để tránh thêm/xoá khỏi layer liên tục (giảm giật lag)
+            existing.x1 = shape.x1;
+            existing.y1 = shape.y1;
+            existing.x2 = shape.x2;
+            existing.y2 = shape.y2;
+            existing.strokeWidth = shape.strokeWidth;
+            existing.color = shape.color;
+            existing.type = shape.type;
+            existing.text = shape.text;
+            existing.freeDrawPoints = shape.freeDrawPoints == null
+                    ? null
+                    : new ArrayList<>(shape.freeDrawPoints);
+            existing.fillColor = shape.fillColor;
+            existing.useGradient = shape.useGradient;
+            existing.gradientTo = shape.gradientTo;
         }
 
-        layerManager.addShapeToActiveLayer(shape);
-        remoteStrokeMap.put(key, shape);
-        repaint();
+        // Debounce repaint để tránh repaint quá nhiều lần khi nhận nhiều updates liên tiếp
+        pendingRepaint = true;
+        if (!repaintTimer.isRunning()) {
+            repaintTimer.start();
+        }
     }
 
     public List<Shape> getAllShapes() {

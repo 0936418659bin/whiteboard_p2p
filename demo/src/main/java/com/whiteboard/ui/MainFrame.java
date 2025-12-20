@@ -7,6 +7,8 @@ import com.formdev.flatlaf.FlatDarkLaf;
 import javax.swing.*;
 import javax.swing.Timer;
 import java.awt.*;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.io.IOException;
@@ -29,18 +31,25 @@ public class MainFrame extends JFrame {
     private ZoomPanel zoomPanel;
     private GridPanel gridPanel;
     private AdvancedToolsPanel advancedToolsPanel;
-    
+
     private JLabel connectionStatusLabel;
     private JLabel peerCountLabel;
+    private JLabel roomInfoLabel;
     private JLabel zoomStatusLabel;
 
     // Peer management
     private final Map<String, Color> peerColors = new HashMap<>();
     private DefaultListModel<NetworkProtocol.PeerInfo> peerListModel;
     private JList<NetworkProtocol.PeerInfo> peerList;
+    private final Set<String> connectedPeers = new HashSet<>();
+    private String hostPeerId; // ID of the room host (null if no host)
+    private boolean isHost = false;
 
     private String peerId;
     private String peerName;
+    private String roomId;
+    private String roomPassword;
+    private boolean joinMode;
     private int listenPort;
     private ServerSocket serverSocket;
     private MessageHandler messageHandler;
@@ -54,7 +63,22 @@ public class MainFrame extends JFrame {
         setExtendedState(JFrame.MAXIMIZED_BOTH);
 
         peerId = UUID.randomUUID().toString().substring(0, 8);
-        peerName = "Peer-" + peerId;
+        String defaultName = "Peer-" + peerId;
+        String defaultRoom = "room-1";
+
+        StartupDialog startup = new StartupDialog(this, defaultName, defaultRoom);
+        startup.setVisible(true);
+        if (!startup.isConfirmed()) {
+            System.exit(0);
+        }
+
+        peerName = startup.getPeerName();
+        roomId = startup.getRoomCode();
+        roomPassword = startup.getRoomPassword();
+        joinMode = startup.isJoinMode();
+        // xác định chủ phòng: ai chọn Create room là host
+        isHost = !joinMode;
+        hostPeerId = isHost ? peerId : null;
         listenPort = 0; // sẽ được gán sau khi tạo ServerSocket
 
         // register local peer with a default color
@@ -77,33 +101,37 @@ public class MainFrame extends JFrame {
 
     private void setupMenuBar() {
         JMenuBar menuBar = new JMenuBar();
-        
+
         // File Menu
         JMenu fileMenu = new JMenu("File");
         JMenuItem newItem = new JMenuItem("New");
-        newItem.addActionListener(e -> canvas.clearCanvas());
+        newItem.addActionListener(e -> performClearWithBroadcast());
         JMenuItem exitItem = new JMenuItem("Exit");
         exitItem.addActionListener(e -> shutdown());
         fileMenu.add(newItem);
         fileMenu.addSeparator();
         fileMenu.add(exitItem);
-        
+
         // Edit Menu
         JMenu editMenu = new JMenu("Edit");
         JMenuItem undoItem = new JMenuItem("Undo (Ctrl+Z)");
-        undoItem.addActionListener(e -> canvas.undo());
+        undoItem.addActionListener(e -> performUndoWithBroadcast());
         JMenuItem redoItem = new JMenuItem("Redo (Ctrl+Y)");
         redoItem.addActionListener(e -> canvas.redo());
         JMenuItem selectAllItem = new JMenuItem("Select All (Ctrl+A)");
         selectAllItem.addActionListener(e -> canvas.selectAll());
         JMenuItem deleteItem = new JMenuItem("Delete (Del)");
         deleteItem.addActionListener(e -> canvas.deleteSelection());
+        JMenuItem renameItem = new JMenuItem("Change Name...");
+        renameItem.addActionListener(e -> changePeerName());
         editMenu.add(undoItem);
         editMenu.add(redoItem);
         editMenu.addSeparator();
         editMenu.add(selectAllItem);
         editMenu.add(deleteItem);
-        
+        editMenu.addSeparator();
+        editMenu.add(renameItem);
+
         // View Menu
         JMenu viewMenu = new JMenu("View");
         JCheckBoxMenuItem gridItem = new JCheckBoxMenuItem("Show Grid", false);
@@ -112,16 +140,20 @@ public class MainFrame extends JFrame {
         snapItem.addActionListener(e -> canvas.getGridManager().setSnapToGrid(snapItem.isSelected()));
         viewMenu.add(gridItem);
         viewMenu.add(snapItem);
-        
+
         // Network Menu
         JMenu networkMenu = new JMenu("Network");
         JMenuItem connectItem = new JMenuItem("Connect to Peer");
         connectItem.addActionListener(e -> showConnectionDialog());
         JMenuItem hostItem = new JMenuItem("Host Session");
         hostItem.addActionListener(e -> showHostDialog());
+        JMenuItem leaveRoomItem = new JMenuItem("Leave Room");
+        leaveRoomItem.addActionListener(e -> leaveRoom());
         networkMenu.add(connectItem);
         networkMenu.add(hostItem);
-        
+        networkMenu.addSeparator();
+        networkMenu.add(leaveRoomItem);
+
         menuBar.add(fileMenu);
         menuBar.add(editMenu);
         menuBar.add(viewMenu);
@@ -152,8 +184,8 @@ public class MainFrame extends JFrame {
         toolPanel.setOnToolSelected(tool -> canvas.getDrawingTool().setCurrentTool(tool));
 
         // Quick actions trên thanh công cụ
-        toolPanel.getUndoButton().addActionListener(e -> canvas.undo());
-        toolPanel.getClearButton().addActionListener(e -> canvas.clearCanvas());
+        toolPanel.getUndoButton().addActionListener(e -> performUndoWithBroadcast());
+        toolPanel.getClearButton().addActionListener(e -> performClearWithBroadcast());
 
         colorPanel.setColorChangeListener(e -> {
             DrawingTool dt = canvas.getDrawingTool();
@@ -169,21 +201,22 @@ public class MainFrame extends JFrame {
         setupZoomPanel();
         setupGridPanel();
 
-        // Khi ở chế độ PAN click vào một nét vẽ sẽ hiển thị thông tin peer trên status bar
+        // Khi ở chế độ PAN click vào một nét vẽ sẽ hiển thị thông tin peer trên status
+        // bar
         canvas.setOnShapeClicked(shape -> {
             if (shape != null && shape.peerId != null) {
                 String id = shape.peerId;
                 String shortId = id.length() > 8 ? id.substring(0, 8) : id;
                 String label = "Peer-" + shortId;
-                SwingUtilities.invokeLater(() ->
-                        connectionStatusLabel.setText("✏ From: " + label));
+                SwingUtilities.invokeLater(() -> connectionStatusLabel.setText("✏ From: " + label));
             }
         });
 
-        // Sync local drawing color với màu đại diện của peer này
-        Color selfColor = getPeerColor(peerId);
-        colorPanel.setSelectedColor(selfColor);
-        canvas.getDrawingTool().setCurrentColor(selfColor);
+        // Mặc định tất cả peers vẽ màu đen; ColorPanel vẫn dùng để đổi màu,
+        // nhưng không còn gán màu riêng cho từng peer.
+        Color defaultColor = Color.BLACK;
+        colorPanel.setSelectedColor(defaultColor);
+        canvas.getDrawingTool().setCurrentColor(defaultColor);
 
         // Docking layout
         setLayout(new BorderLayout(5, 5));
@@ -215,13 +248,13 @@ public class MainFrame extends JFrame {
         filePanel.setListener(new FilePanel.FileOperationListener() {
             @Override
             public void onNewProject() {
-                canvas.clearCanvas();
+                performClearWithBroadcast();
             }
 
             @Override
             public void onSaveProject(String filePath) {
-                FileManager.ProjectData data = new FileManager.ProjectData("Drawing", 
-                    canvas.getWidth(), canvas.getHeight());
+                FileManager.ProjectData data = new FileManager.ProjectData("Drawing",
+                        canvas.getWidth(), canvas.getHeight());
                 data.shapes = canvas.getAllShapes();
                 data.layers = canvas.getLayerManager().getAllLayers();
                 FileManager.saveProjectAsJSON(filePath, data);
@@ -245,11 +278,51 @@ public class MainFrame extends JFrame {
 
             @Override
             public void onExportSVG(String filePath) {
-                FileManager.exportAsSVG(filePath, canvas.getAllShapes(), 
-                    canvas.getWidth(), canvas.getHeight());
+                FileManager.exportAsSVG(filePath, canvas.getAllShapes(),
+                        canvas.getWidth(), canvas.getHeight());
                 JOptionPane.showMessageDialog(MainFrame.this, "Exported as SVG!");
             }
         });
+    }
+
+    private void changePeerName() {
+        String newName = JOptionPane.showInputDialog(this,
+                "Enter new display name:", peerName);
+        if (newName == null)
+            return; // user cancelled
+        newName = newName.trim();
+        if (newName.isEmpty() || newName.equals(peerName))
+            return;
+
+        peerName = newName;
+
+        // cập nhật status bar
+        if (connectionStatusLabel != null) {
+            connectionStatusLabel.setText("🔵 " + peerName + " (" + peerId + ")");
+        }
+
+        // cập nhật entry của chính mình trong danh sách peers
+        if (peerListModel != null) {
+            for (int i = 0; i < peerListModel.size(); i++) {
+                NetworkProtocol.PeerInfo info = peerListModel.getElementAt(i);
+                if (info.peerId.equals(peerId)) {
+                    info.name = peerName;
+                    peerListModel.set(i, info);
+                    break;
+                }
+            }
+        }
+
+        // khởi động lại discovery với tên mới
+        if (peerDiscovery != null) {
+            peerDiscovery.stop();
+        }
+        peerDiscovery = new PeerDiscovery(peerId, peerName, listenPort, roomId, roomPassword);
+        try {
+            peerDiscovery.start();
+        } catch (IOException e) {
+            System.err.println("Failed to restart discovery: " + e.getMessage());
+        }
     }
 
     private JPanel createPeersPanel() {
@@ -265,11 +338,13 @@ public class MainFrame extends JFrame {
         peerList.setCellRenderer(new DefaultListCellRenderer() {
             @Override
             public Component getListCellRendererComponent(JList<?> list, Object value, int index,
-                                                          boolean isSelected, boolean cellHasFocus) {
-                JLabel label = (JLabel) super.getListCellRendererComponent(list, value, index, isSelected, cellHasFocus);
+                    boolean isSelected, boolean cellHasFocus) {
+                JLabel label = (JLabel) super.getListCellRendererComponent(list, value, index, isSelected,
+                        cellHasFocus);
                 if (value instanceof NetworkProtocol.PeerInfo) {
                     NetworkProtocol.PeerInfo peer = (NetworkProtocol.PeerInfo) value;
-                    label.setText(peer.name + " (" + peer.peerId + ")");
+                    String role = (hostPeerId != null && hostPeerId.equals(peer.peerId)) ? "HOST" : "GUEST";
+                    label.setText("[" + role + "] " + peer.name + " (" + peer.peerId + ")");
                     Color c = getPeerColor(peer.peerId);
                     label.setIcon(new ColorIcon(c));
                 }
@@ -279,6 +354,30 @@ public class MainFrame extends JFrame {
 
         JScrollPane scrollPane = new JScrollPane(peerList);
         panel.add(scrollPane, BorderLayout.CENTER);
+
+        // Nếu là host, cho phép kick peer khác bằng menu chuột phải
+        peerList.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mousePressed(MouseEvent e) {
+                if (!isHost || SwingUtilities.isLeftMouseButton(e))
+                    return;
+                int index = peerList.locationToIndex(e.getPoint());
+                if (index < 0)
+                    return;
+                peerList.setSelectedIndex(index);
+                NetworkProtocol.PeerInfo selected = peerListModel.getElementAt(index);
+                if (selected == null || selected.peerId.equals(peerId))
+                    return; // không kick chính mình
+
+                if (SwingUtilities.isRightMouseButton(e)) {
+                    JPopupMenu menu = new JPopupMenu();
+                    JMenuItem kickItem = new JMenuItem("Kick " + selected.name);
+                    kickItem.addActionListener(ev -> kickPeer(selected.peerId));
+                    menu.add(kickItem);
+                    menu.show(peerList, e.getX(), e.getY());
+                }
+            }
+        });
 
         return panel;
     }
@@ -319,7 +418,7 @@ public class MainFrame extends JFrame {
                 new Color(0x9B51E0), // purple
                 new Color(0x2ECC71), // green
                 new Color(0xF2994A), // orange
-                new Color(0xE91E63)  // pink
+                new Color(0xE91E63) // pink
         };
         return palette[index % palette.length];
     }
@@ -393,26 +492,63 @@ public class MainFrame extends JFrame {
         JPanel panel = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 4));
         panel.setBorder(BorderFactory.createEmptyBorder(4, 10, 4, 10));
 
-        connectionStatusLabel = new JLabel("🔵 ID: " + peerId);
+        // Connection / self info
+        connectionStatusLabel = new JLabel("🔵 " + peerName + " (" + peerId + ")");
+
+        // Room info
+        roomInfoLabel = new JLabel();
+        updateRoomInfo();
+
+        // Peer count with tooltip
         peerCountLabel = new JLabel("Peers: 0");
+        peerCountLabel.setToolTipText("Click to view connected peers");
+        peerCountLabel.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        peerCountLabel.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent e) {
+                showConnectionDialog();
+            }
+
+            @Override
+            public void mouseEntered(MouseEvent e) {
+                updatePeerCountTooltip();
+            }
+        });
+
+        // Zoom status
         zoomStatusLabel = new JLabel("Zoom: 100%");
 
-        JButton connectBtn = new JButton("Connect");
-        connectBtn.addActionListener(e -> showConnectionDialog());
-
-        JButton hostBtn = new JButton("Host");
-        hostBtn.addActionListener(e -> showHostDialog());
-
         panel.add(connectionStatusLabel);
+        panel.add(new JSeparator(SwingConstants.VERTICAL));
+        panel.add(roomInfoLabel);
         panel.add(new JSeparator(SwingConstants.VERTICAL));
         panel.add(peerCountLabel);
         panel.add(new JSeparator(SwingConstants.VERTICAL));
         panel.add(zoomStatusLabel);
-        panel.add(new JSeparator(SwingConstants.VERTICAL));
-        panel.add(connectBtn);
-        panel.add(hostBtn);
 
         return panel;
+    }
+
+    private void updateRoomInfo() {
+        String passwordDisplay = roomPassword != null && !roomPassword.isEmpty() ? "***" : "none";
+        String mode = isHost ? "Host" : "Join";
+        roomInfoLabel.setText(String.format("Room: %s (pass: %s) | Mode: %s",
+                roomId, passwordDisplay, mode));
+    }
+
+    private void updatePeerCountTooltip() {
+        if (connectedPeers.isEmpty()) {
+            peerCountLabel.setToolTipText("No peers connected");
+            return;
+        }
+
+        StringBuilder tooltip = new StringBuilder("<html>Connected peers:<br>");
+        for (String peerId : connectedPeers) {
+            String shortId = peerId.length() > 8 ? peerId.substring(0, 8) : peerId;
+            tooltip.append("• Peer-").append(shortId).append("<br>");
+        }
+        tooltip.append("</html>");
+        peerCountLabel.setToolTipText(tooltip.toString());
     }
 
     private void updateZoomStatus() {
@@ -426,44 +562,112 @@ public class MainFrame extends JFrame {
         try {
             serverSocket = new ServerSocket(0);
             listenPort = serverSocket.getLocalPort();
+            System.out.println("[MainFrame] Server socket created at port " + listenPort);
         } catch (IOException e) {
             System.err.println("Failed to open server socket: " + e.getMessage());
         }
 
         messageHandler.setOnShapesReceived(shapeData -> {
-            if (shapeData.shapes != null) {
-                for (com.whiteboard.drawing.Shape shape : shapeData.shapes) {
-                    // đảm bảo peer được đăng ký và áp dụng màu đại diện cho peer gửi shape
-                    if (shape.peerId != null) {
-                        String id = shape.peerId;
-                        String name = "Peer-" + (id.length() > 8 ? id.substring(0, 8) : id);
-                        registerPeer(id, name);
-                        shape.color = getPeerColor(id);
+            if (shapeData.shapes != null && !shapeData.shapes.isEmpty()) {
+                SwingUtilities.invokeLater(() -> {
+                    // Batch process tất cả shapes trong một lần để giảm số lần repaint
+                    String drawingPeerId = null;
+                    for (com.whiteboard.drawing.Shape shape : shapeData.shapes) {
+                        if (shape.peerId != null) {
+                            drawingPeerId = shape.peerId;
+                            String id = shape.peerId;
+                            String name = "Peer-" + (id.length() > 8 ? id.substring(0, 8) : id);
+                            // chỉ đăng ký peer để hiển thị trong danh sách, không đổi màu shape nữa
+                            registerPeer(id, name);
+                        }
+                        canvas.drawRemoteShape(shape);
                     }
-                    canvas.drawRemoteShape(shape);
-                }
+                    // Hiển thị peer đang vẽ trên status bar
+                    if (drawingPeerId != null && connectionStatusLabel != null) {
+                        String shortId = drawingPeerId.length() > 8 ? drawingPeerId.substring(0, 8) : drawingPeerId;
+                        String label = "Peer-" + shortId;
+                        connectionStatusLabel.setText("✏ " + label + " is drawing...");
+                    }
+                    // drawRemoteShape đã có debounce timer, không cần repaint thủ công ở đây
+                });
             }
         });
 
-        messageHandler.setOnClearReceived(senderId -> canvas.clearCanvas());
-        messageHandler.setOnUndoReceived(senderId -> canvas.undo());
+        messageHandler.setOnClearReceived(senderId -> SwingUtilities.invokeLater(canvas::clearCanvas));
+        messageHandler.setOnUndoReceived(senderId -> SwingUtilities.invokeLater(() -> canvas.undoForPeer(senderId)));
+        messageHandler.setOnDisconnectReceived(
+                reason -> SwingUtilities.invokeLater(() -> handleRemoteRoomDisconnect(reason)));
 
         // Realtime: gửi trực tiếp shape đang vẽ mỗi khi canvas cập nhật
         canvas.setOnShapeDrawn(shape -> {
             try {
                 if (shape != null) {
                     messageHandler.broadcastShapes(java.util.Collections.singletonList(shape), peerId);
+                    // Cập nhật status bar hiển thị peer local đang vẽ
+                    if (connectionStatusLabel != null) {
+                        connectionStatusLabel.setText("✏ You are drawing...");
+                    }
                 }
             } catch (Exception e) {
                 System.err.println("Error broadcasting: " + e.getMessage());
             }
         });
 
-        peerDiscovery = new PeerDiscovery(peerId, peerName, listenPort);
+        System.out.println("[MainFrame] Starting PeerDiscovery with config: peerId=" + peerId
+                + ", name=" + peerName
+                + ", roomId=" + roomId
+                + ", roomPassword=" + (roomPassword == null || roomPassword.isEmpty() ? "(empty)" : "***")
+                + ", listenPort=" + listenPort
+                + ", joinMode=" + joinMode);
+
+        peerDiscovery = new PeerDiscovery(peerId, peerName, listenPort, roomId, roomPassword);
+        // callback từ discovery: log và auto-join (mọi mode) nếu chưa có kết nối tới
+        // peer đó
+        peerDiscovery.setPeerFoundCallback(info -> {
+            System.out.println("[MainFrame] Peer found in same room: " + info);
+            // tránh tạo trùng nhiều kết nối 2 chiều
+            if (messageHandler.getConnection(info.peerId) != null) {
+                System.out.println("[MainFrame] Already connected to peer " + info.peerId + ", skip auto-connect.");
+                return;
+            }
+            System.out.println("[MainFrame] Auto-connecting to peer " + info.peerId
+                    + " at " + info.ipAddress + ":" + info.port
+                    + " (joinMode=" + joinMode + ")");
+            SwingUtilities.invokeLater(() -> connectToPeer(info));
+        });
         try {
             peerDiscovery.start();
         } catch (IOException e) {
             System.err.println("Failed to start discovery: " + e.getMessage());
+        }
+
+        // Nếu user chọn JOIN room thì bắt buộc phải có ít nhất 1 kết nối TCP
+        // trong một khoảng thời gian ngắn (không phụ thuộc vào UDP listen được hay
+        // không).
+        if (joinMode) {
+            new Thread(() -> {
+                try {
+                    // chờ một chút cho discovery kịp nhận broadcast từ các peer khác
+                    Thread.sleep(3500);
+                } catch (InterruptedException ignored) {
+                }
+
+                if (peerDiscovery != null && messageHandler.getConnectionCount() == 0) {
+                    System.out.println("[MainFrame] Join mode: no TCP connections for room=" + roomId
+                            + " after wait, showing error dialog.");
+                    SwingUtilities.invokeLater(() -> {
+                        JOptionPane.showMessageDialog(this,
+                                "Không tìm thấy phòng \"" + roomId + "\" với mật khẩu đã nhập.\n" +
+                                        "Hãy kiểm tra lại room code và mật khẩu, hoặc chọn Create room.",
+                                "Room not found",
+                                JOptionPane.ERROR_MESSAGE);
+                        // Version nhẹ: không tắt hẳn app, chỉ đóng frame hiện tại
+                        // và mở lại MainFrame để hiện lại StartupDialog.
+                        dispose();
+                        new MainFrame();
+                    });
+                }
+            }, "JoinRoomValidator").start();
         }
 
         new Thread(this::acceptConnections).start();
@@ -479,6 +683,8 @@ public class MainFrame extends JFrame {
             while (true) {
                 Socket socket = serverSocket.accept();
                 String remotePeerId = socket.getInetAddress().getHostAddress();
+                System.out.println("[MainFrame] Incoming TCP connection from " + remotePeerId
+                        + ":" + socket.getPort());
 
                 try {
                     PeerConnection connection = new PeerConnection(socket, remotePeerId);
@@ -488,13 +694,17 @@ public class MainFrame extends JFrame {
                     connection.setDisconnectHandler(disconnected -> {
                         messageHandler.removeConnection(disconnected);
                         updatePeerCount();
+                        if (!isHost && messageHandler.getConnectionCount() == 0) {
+                            handleRemoteRoomDisconnect("ROOM_CLOSED");
+                        }
                     });
 
                     if (!canvas.getAllShapes().isEmpty()) {
                         connection.sendMessage(new NetworkProtocol.Message(
                                 NetworkProtocol.MessageType.SHAPES, peerId,
-                                new NetworkProtocol.ShapeData(canvas.getAllShapes(), 
-                                    System.currentTimeMillis())));
+                                new NetworkProtocol.ShapeData(canvas.getAllShapes(),
+                                        System.currentTimeMillis())));
+                        System.out.println("[MainFrame] Sent initial SHAPES sync to " + remotePeerId);
                     }
                 } catch (IOException e) {
                     System.err.println("Connection error: " + e.getMessage());
@@ -507,10 +717,24 @@ public class MainFrame extends JFrame {
 
     private void showConnectionDialog() {
         ConnectionDialog dialog = new ConnectionDialog(this);
-        dialog.updatePeerList(peerDiscovery.getDiscoveredPeers());
+        // chỉ hiển thị peers cùng phòng
+        java.util.List<NetworkProtocol.PeerInfo> sameRoom = new java.util.ArrayList<>();
+        for (NetworkProtocol.PeerInfo info : peerDiscovery.getDiscoveredPeers()) {
+            if (roomId == null || roomId.isEmpty() || roomId.equals(info.roomId)) {
+                sameRoom.add(info);
+            }
+        }
+        dialog.updatePeerList(sameRoom);
 
-        Timer timer = new Timer(1000, e ->
-            dialog.updatePeerList(peerDiscovery.getDiscoveredPeers()));
+        Timer timer = new Timer(1000, e -> {
+            java.util.List<NetworkProtocol.PeerInfo> filtered = new java.util.ArrayList<>();
+            for (NetworkProtocol.PeerInfo info : peerDiscovery.getDiscoveredPeers()) {
+                if (roomId == null || roomId.isEmpty() || roomId.equals(info.roomId)) {
+                    filtered.add(info);
+                }
+            }
+            dialog.updatePeerList(filtered);
+        });
         timer.start();
 
         dialog.setOnConnect(peerInfo -> {
@@ -531,9 +755,9 @@ public class MainFrame extends JFrame {
     private void showHostDialog() {
         JOptionPane.showMessageDialog(this,
                 "🌐 Hosting Server\n" +
-                "Port: " + listenPort + "\n" +
-                "ID: " + peerId + "\n" +
-                "Name: " + peerName,
+                        "Port: " + listenPort + "\n" +
+                        "ID: " + peerId + "\n" +
+                        "Name: " + peerName,
                 "Host Session", JOptionPane.INFORMATION_MESSAGE);
     }
 
@@ -541,11 +765,19 @@ public class MainFrame extends JFrame {
         new Thread(() -> {
             try {
                 int targetPort = peerInfo.port > 0 ? peerInfo.port : listenPort;
+                System.out.println("[MainFrame] Connecting to peer " + peerInfo.peerId
+                        + " at " + peerInfo.ipAddress + ":" + targetPort
+                        + " (local listenPort=" + listenPort + ")");
                 Socket socket = new Socket(peerInfo.ipAddress, targetPort);
                 PeerConnection connection = new PeerConnection(socket, peerInfo.peerId);
                 messageHandler.addConnection(connection);
                 // đăng ký peer để hiển thị và gán màu cố định
                 registerPeer(peerInfo.peerId, peerInfo.name);
+                // nếu là client (guest) thì peer đầu tiên kết nối đến được xem là host
+                if (!isHost && hostPeerId == null) {
+                    hostPeerId = peerInfo.peerId;
+                    updateRoomInfo();
+                }
                 updatePeerCount();
 
                 connection.sendMessage(new NetworkProtocol.Message(
@@ -557,8 +789,12 @@ public class MainFrame extends JFrame {
                     messageHandler.removeConnection(disconnected);
                     updatePeerCount();
                     connectionStatusLabel.setText("🔴 Disconnected");
+                    if (!isHost && messageHandler.getConnectionCount() == 0) {
+                        handleRemoteRoomDisconnect("ROOM_CLOSED");
+                    }
                 });
             } catch (IOException e) {
+                System.err.println("[MainFrame] Failed to connect to peer " + peerInfo + ": " + e.getMessage());
                 JOptionPane.showMessageDialog(this,
                         "Connection failed: " + e.getMessage(),
                         "Error", JOptionPane.ERROR_MESSAGE);
@@ -566,19 +802,196 @@ public class MainFrame extends JFrame {
         }).start();
     }
 
+    private void leaveRoom() {
+        int result = JOptionPane.showConfirmDialog(this,
+                "Bạn có chắc muốn thoát phòng hiện tại và chọn phòng khác không?",
+                "Leave Room",
+                JOptionPane.YES_NO_OPTION,
+                JOptionPane.QUESTION_MESSAGE);
+        if (result != JOptionPane.YES_OPTION) {
+            return;
+        }
+
+        // nếu là host, thông báo cho tất cả peers còn lại rằng phòng đã đóng
+        if (isHost && messageHandler != null) {
+            for (PeerConnection conn : messageHandler.getConnections()) {
+                try {
+                    conn.sendMessage(new NetworkProtocol.Message(
+                            NetworkProtocol.MessageType.DISCONNECT, peerId, "ROOM_CLOSED"));
+                } catch (IOException ignored) {
+                }
+            }
+        }
+
+        // dừng discovery và đóng tất cả kết nối hiện tại
+        if (peerDiscovery != null) {
+            peerDiscovery.stop();
+            peerDiscovery = null;
+        }
+        if (messageHandler != null) {
+            messageHandler.closeAll();
+        }
+
+        // mở lại StartupDialog để chọn/join/create room mới
+        String defaultName = peerName;
+        String defaultRoom = roomId != null ? roomId : "room-1";
+        StartupDialog startup = new StartupDialog(this, defaultName, defaultRoom);
+        startup.setVisible(true);
+        if (!startup.isConfirmed()) {
+            // nếu user bấm Exit thì đóng app luôn
+            shutdown();
+            return;
+        }
+
+        peerName = startup.getPeerName();
+        roomId = startup.getRoomCode();
+        roomPassword = startup.getRoomPassword();
+        joinMode = startup.isJoinMode();
+
+        // cập nhật status bar với tên mới (peerId giữ nguyên để không thay đổi màu)
+        if (connectionStatusLabel != null) {
+            connectionStatusLabel.setText("🔵 " + peerName + " (" + peerId + ")");
+        }
+
+        // khởi động lại discovery với room/password mới
+        peerDiscovery = new PeerDiscovery(peerId, peerName, listenPort, roomId, roomPassword);
+        try {
+            peerDiscovery.start();
+        } catch (IOException e) {
+            System.err.println("Failed to restart discovery: " + e.getMessage());
+        }
+
+        // nếu đang ở chế độ JOIN thì áp dụng lại logic kiểm tra bắt buộc phải có kết
+        // nối
+        if (joinMode) {
+            new Thread(() -> {
+                try {
+                    Thread.sleep(3500);
+                } catch (InterruptedException ignored) {
+                }
+
+                if (peerDiscovery != null && messageHandler.getConnectionCount() == 0) {
+                    SwingUtilities.invokeLater(() -> {
+                        JOptionPane.showMessageDialog(this,
+                                "Không tìm thấy phòng \"" + roomId + "\" với mật khẩu đã nhập.\n" +
+                                        "Hãy kiểm tra lại room code và mật khẩu, hoặc chọn Create room.",
+                                "Room not found",
+                                JOptionPane.ERROR_MESSAGE);
+                        dispose();
+                        new MainFrame();
+                    });
+                }
+            }, "JoinRoomValidator-Leave").start();
+        }
+    }
+
     private void setupEventHandlers() {
-        colorPanel.widthSlider.addChangeListener(e ->
-            canvas.getDrawingTool().setStrokeWidth(colorPanel.getStrokeWidth()));
+        colorPanel.widthSlider
+                .addChangeListener(e -> canvas.getDrawingTool().setStrokeWidth(colorPanel.getStrokeWidth()));
+    }
+
+    /**
+     * Host có thể kick 1 peer ra khỏi phòng.
+     */
+    private void kickPeer(String targetPeerId) {
+        if (!isHost || messageHandler == null)
+            return;
+        PeerConnection conn = messageHandler.getConnection(targetPeerId);
+        if (conn == null)
+            return;
+        int confirm = JOptionPane.showConfirmDialog(this,
+                "Kick peer " + targetPeerId + " khỏi phòng?",
+                "Kick Peer", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+        if (confirm != JOptionPane.YES_OPTION)
+            return;
+        try {
+            conn.sendMessage(new NetworkProtocol.Message(
+                    NetworkProtocol.MessageType.DISCONNECT, peerId, "KICK"));
+        } catch (IOException ignored) {
+        }
+        conn.disconnect();
+        messageHandler.removeConnection(targetPeerId);
+        updatePeerCount();
+    }
+
+    /**
+     * Xử lý khi host gửi tín hiệu đóng phòng hoặc kick.
+     */
+    private void handleRemoteRoomDisconnect(String reason) {
+        String message;
+        if ("ROOM_CLOSED".equals(reason)) {
+            message = "Chủ phòng đã đóng phòng. Bạn sẽ được đưa về màn hình chọn phòng.";
+        } else if ("KICK".equals(reason)) {
+            message = "Bạn đã bị chủ phòng kick khỏi phòng.";
+        } else {
+            message = "Bạn đã bị ngắt kết nối khỏi phòng.";
+        }
+        JOptionPane.showMessageDialog(this, message, "Room Closed",
+                JOptionPane.INFORMATION_MESSAGE);
+
+        // Dọn dẹp và trở về màn hình chọn room
+        if (peerDiscovery != null) {
+            peerDiscovery.stop();
+            peerDiscovery = null;
+        }
+        if (messageHandler != null) {
+            messageHandler.closeAll();
+        }
+        try {
+            if (serverSocket != null) {
+                serverSocket.close();
+            }
+        } catch (IOException ignored) {
+        }
+
+        dispose();
+        new MainFrame();
+    }
+
+    /**
+     * Thực hiện Undo local và thông báo cho tất cả peers khác.
+     */
+    private void performUndoWithBroadcast() {
+        canvas.undoForPeer(peerId);
+        try {
+            messageHandler.broadcastUndo(peerId);
+        } catch (Exception ex) {
+            System.err.println("Failed to broadcast undo: " + ex.getMessage());
+        }
+    }
+
+    /**
+     * Thực hiện Clear Canvas local và thông báo cho tất cả peers khác.
+     */
+    private void performClearWithBroadcast() {
+        canvas.clearCanvas();
+        try {
+            messageHandler.broadcastClear(peerId);
+        } catch (Exception ex) {
+            System.err.println("Failed to broadcast clear: " + ex.getMessage());
+        }
     }
 
     private void updatePeerCount() {
-        SwingUtilities.invokeLater(() ->
-            peerCountLabel.setText("Peers: " + messageHandler.getConnectionCount()));
+        SwingUtilities.invokeLater(() -> peerCountLabel.setText("Peers: " + messageHandler.getConnectionCount()));
     }
 
     private void shutdown() {
-        if (peerDiscovery != null) peerDiscovery.stop();
-        if (messageHandler != null) messageHandler.closeAll();
+        // nếu là host, thông báo đóng phòng cho các peers
+        if (isHost && messageHandler != null) {
+            for (PeerConnection conn : messageHandler.getConnections()) {
+                try {
+                    conn.sendMessage(new NetworkProtocol.Message(
+                            NetworkProtocol.MessageType.DISCONNECT, peerId, "ROOM_CLOSED"));
+                } catch (IOException ignored) {
+                }
+            }
+        }
+
+        if (peerDiscovery != null)
+            peerDiscovery.stop();
+        if (messageHandler != null)
+            messageHandler.closeAll();
         if (serverSocket != null) {
             try {
                 serverSocket.close();

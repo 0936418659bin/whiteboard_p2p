@@ -13,6 +13,8 @@ public class PeerDiscovery {
     private final String peerId;
     private final String peerName;
     private final int listenPort;
+    private final String roomId;
+    private final String roomPassword;
     private DatagramSocket broadcastSocket;
     private Thread discoveryThread;
     private Thread listeningThread;
@@ -21,10 +23,12 @@ public class PeerDiscovery {
     private Consumer<NetworkProtocol.PeerInfo> onPeerFound;
     private Consumer<NetworkProtocol.PeerInfo> onPeerLost;
 
-    public PeerDiscovery(String peerId, String peerName, int listenPort) {
+    public PeerDiscovery(String peerId, String peerName, int listenPort, String roomId, String roomPassword) {
         this.peerId = peerId;
         this.peerName = peerName;
         this.listenPort = listenPort;
+        this.roomId = roomId;
+        this.roomPassword = roomPassword;
         this.discoveredPeers = new ConcurrentHashMap<>();
         this.isDiscovering = false;
     }
@@ -50,7 +54,8 @@ public class PeerDiscovery {
 
     private void broadcastPresence() {
         try {
-            String messageStr = peerId + "|" + peerName + "|" + listenPort;
+            String messageStr = peerId + "|" + peerName + "|" + listenPort + "|" +
+                    (roomId == null ? "" : roomId) + "|" + (roomPassword == null ? "" : roomPassword);
             byte[] message = messageStr.getBytes();
 
             while (isDiscovering) {
@@ -58,6 +63,11 @@ public class PeerDiscovery {
                     DatagramPacket packet = new DatagramPacket(
                             message, message.length,
                             InetAddress.getByName(BROADCAST_ADDRESS), BROADCAST_PORT);
+                    System.out.println("[PeerDiscovery] Broadcasting presence: peerId=" + peerId
+                            + ", name=" + peerName
+                            + ", listenPort=" + listenPort
+                            + ", roomId=" + (roomId == null ? "" : roomId)
+                            + ", roomPassword=" + (roomPassword == null || roomPassword.isEmpty() ? "(empty)" : "***"));
                     broadcastSocket.send(packet);
                     Thread.sleep(3000); // Broadcast every 3 seconds
                 } catch (IOException e) {
@@ -70,9 +80,18 @@ public class PeerDiscovery {
     }
 
     private void listenForPeers() {
+        DatagramSocket socket = null;
         try {
-            DatagramSocket socket = new DatagramSocket(BROADCAST_PORT);
-            socket.setBroadcast(true);
+            try {
+                socket = new DatagramSocket(BROADCAST_PORT);
+                socket.setBroadcast(true);
+            } catch (BindException be) {
+                // Trên một máy chỉ cần một tiến trình listen UDP; các tiến trình khác vẫn có
+                // thể broadcast.
+                System.err.println("[PeerDiscovery] Listen socket already in use on port " + BROADCAST_PORT
+                        + ", skip listening in this instance.");
+                return;
+            }
 
             byte[] buffer = new byte[1024];
 
@@ -84,23 +103,48 @@ public class PeerDiscovery {
                     String data = new String(packet.getData(), 0, packet.getLength());
                     String[] parts = data.split("\\|");
 
-                    if (parts.length == 3) {
+                    if (parts.length >= 3) {
                         String discoveredPeerId = parts[0];
                         String discoveredName = parts[1];
                         int discoveredPort = Integer.parseInt(parts[2]);
+                        String discoveredRoom = parts.length >= 4 ? parts[3] : "";
+                        String discoveredPass = parts.length >= 5 ? parts[4] : "";
                         String ipAddress = packet.getAddress().getHostAddress();
 
                         if (!discoveredPeerId.equals(peerId)) {
-                            NetworkProtocol.PeerInfo peerInfo = new NetworkProtocol.PeerInfo(discoveredPeerId,
-                                    discoveredName, ipAddress, discoveredPort);
+                            // chỉ quan tâm peers cùng phòng (roomId) và cùng mật khẩu nếu có đặt
+                            if (roomId != null && !roomId.isEmpty() && !roomId.equals(discoveredRoom)) {
+                                System.out.println("[PeerDiscovery] Ignored peer " + discoveredPeerId
+                                        + " from IP " + ipAddress
+                                        + " vì room khác. LocalRoom=" + roomId
+                                        + ", RemoteRoom=" + discoveredRoom);
+                                continue;
+                            }
+                            if (roomPassword != null && !roomPassword.isEmpty()
+                                    && !roomPassword.equals(discoveredPass)) {
+                                System.out.println("[PeerDiscovery] Ignored peer " + discoveredPeerId
+                                        + " from IP " + ipAddress
+                                        + " vì sai mật khẩu phòng.");
+                                continue;
+                            }
 
-                            if (!discoveredPeers.containsKey(discoveredPeerId)) {
+                            NetworkProtocol.PeerInfo peerInfo = new NetworkProtocol.PeerInfo(discoveredPeerId,
+                                    discoveredName, ipAddress, discoveredRoom, discoveredPort);
+
+                            NetworkProtocol.PeerInfo existing = discoveredPeers.get(discoveredPeerId);
+                            if (existing == null) {
                                 discoveredPeers.put(discoveredPeerId, peerInfo);
+                                System.out.println("[PeerDiscovery] Found peer: " + peerInfo
+                                        + " (ip=" + ipAddress + ", port=" + discoveredPort + ")");
                                 if (onPeerFound != null) {
                                     onPeerFound.accept(peerInfo);
                                 }
                             } else {
-                                discoveredPeers.get(discoveredPeerId).lastSeen = System.currentTimeMillis();
+                                existing.lastSeen = System.currentTimeMillis();
+                                existing.name = discoveredName;
+                                existing.roomId = discoveredRoom;
+                                existing.port = discoveredPort;
+                                System.out.println("[PeerDiscovery] Updated peer: " + existing);
                             }
                         }
                     }
@@ -110,9 +154,12 @@ public class PeerDiscovery {
                     }
                 }
             }
-            socket.close();
         } catch (Exception e) {
             System.err.println("Listen error: " + e.getMessage());
+        } finally {
+            if (socket != null && !socket.isClosed()) {
+                socket.close();
+            }
         }
     }
 

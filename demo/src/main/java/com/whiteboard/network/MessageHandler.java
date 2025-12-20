@@ -11,6 +11,7 @@ public class MessageHandler {
     private Consumer<String> onClearReceived;
     private Consumer<String> onUndoReceived;
     private Consumer<List<NetworkProtocol.PeerInfo>> onPeerListReceived;
+    private Consumer<String> onDisconnectReceived;
 
     public MessageHandler() {
         this.connections = new ConcurrentHashMap<>();
@@ -63,7 +64,10 @@ public class MessageHandler {
                 // Handle sync response
                 break;
             case DISCONNECT:
-                // Handle disconnect
+                if (onDisconnectReceived != null) {
+                    String reason = (message.data instanceof String) ? (String) message.data : "";
+                    onDisconnectReceived.accept(reason);
+                }
                 break;
         }
     }
@@ -135,6 +139,10 @@ public class MessageHandler {
 
     public void setOnPeerListReceived(Consumer<List<NetworkProtocol.PeerInfo>> callback) {
         this.onPeerListReceived = callback;
+    }
+
+    public void setOnDisconnectReceived(Consumer<String> callback) {
+        this.onDisconnectReceived = callback;
     }
 
     public Collection<PeerConnection> getConnections() {

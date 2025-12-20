@@ -51,18 +51,25 @@ public class NetworkProtocol {
         public String peerId;
         public String name;
         public String ipAddress;
+        public String roomId;
+        public String roomPassword;
         public long lastSeen;
         public boolean isActive;
         public int port;
 
         public PeerInfo(String peerId, String name, String ipAddress) {
-            this(peerId, name, ipAddress, 0);
+            this(peerId, name, ipAddress, null, 0);
         }
 
         public PeerInfo(String peerId, String name, String ipAddress, int port) {
+            this(peerId, name, ipAddress, null, port);
+        }
+
+        public PeerInfo(String peerId, String name, String ipAddress, String roomId, int port) {
             this.peerId = peerId;
             this.name = name;
             this.ipAddress = ipAddress;
+            this.roomId = roomId;
             this.port = port;
             this.lastSeen = System.currentTimeMillis();
             this.isActive = true;

@@ -29,6 +29,12 @@ public class Shape implements Serializable, Cloneable {
     public ShapeType type;
     public long timestamp;
     public String peerId;
+    // Text styling info (dùng cho TEXT shapes)
+    public String fontName;
+    public int fontSize;      // px
+    public int fontStyle;     // Font.PLAIN/BOLD/ITALIC...
+    // 0=LEFT, 1=CENTER, 2=RIGHT
+    public int textAlign = 0;
 
     public Shape(ShapeType type, int startX, int startY, int endX, int endY,
             Color color, int strokeWidth, String peerId) {
@@ -230,8 +236,21 @@ public class Shape implements Serializable, Cloneable {
                 break;
             case TEXT:
                 if (text != null && !text.isEmpty()) {
-                    g.setFont(new Font("Arial", Font.PLAIN, width * 2));
-                    g.drawString(text, x1, y1);
+                    String fName = (fontName != null) ? fontName : "Arial";
+                    int fStyle = (fontStyle != 0) ? fontStyle : Font.PLAIN;
+                    int fSize = (fontSize > 0) ? fontSize : Math.max(12, width * 3);
+                    Font f = new Font(fName, fStyle, fSize);
+                    g.setFont(f);
+                    FontMetrics fm = g.getFontMetrics(f);
+                    int textWidth = fm.stringWidth(text);
+                    int drawX = x1;
+                    if (textAlign == 1) { // CENTER
+                        drawX = x1 - textWidth / 2;
+                    } else if (textAlign == 2) { // RIGHT
+                        drawX = x1 - textWidth;
+                    }
+                    int baselineY = y1;
+                    g.drawString(text, drawX, baselineY);
                 }
                 break;
             case POLYGON: {
