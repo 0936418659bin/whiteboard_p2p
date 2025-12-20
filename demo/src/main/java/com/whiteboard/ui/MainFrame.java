@@ -602,6 +602,8 @@ public class MainFrame extends JFrame {
         canvas.setOnShapeDrawn(shape -> {
             try {
                 if (shape != null) {
+                    int count = messageHandler.getConnectionCount();
+                    System.out.println("[MainFrame] Broadcasting shape to " + count + " peer(s)");
                     messageHandler.broadcastShapes(java.util.Collections.singletonList(shape), peerId);
                     // Cập nhật status bar hiển thị peer local đang vẽ
                     if (connectionStatusLabel != null) {
@@ -609,7 +611,8 @@ public class MainFrame extends JFrame {
                     }
                 }
             } catch (Exception e) {
-                System.err.println("Error broadcasting: " + e.getMessage());
+                System.err.println("[MainFrame] Error broadcasting shape: " + e.getMessage());
+                e.printStackTrace();
             }
         });
 
@@ -704,8 +707,20 @@ public class MainFrame extends JFrame {
                         + ":" + socket.getPort());
 
                 try {
-                    PeerConnection connection = new PeerConnection(socket, remotePeerId);
+                    // Tìm peerId thật từ UDP discovery dựa trên IP
+                    String realPeerId = remotePeerId;
+                    for (NetworkProtocol.PeerInfo info : peerDiscovery.getDiscoveredPeers()) {
+                        if (info.ipAddress.equals(remotePeerId)) {
+                            realPeerId = info.peerId;
+                            System.out.println("[MainFrame] Matched incoming connection IP " + remotePeerId
+                                    + " to peerId " + realPeerId + " from UDP discovery");
+                            break;
+                        }
+                    }
+
+                    PeerConnection connection = new PeerConnection(socket, realPeerId);
                     messageHandler.addConnection(connection);
+                    registerPeer(realPeerId, "Peer-" + realPeerId.substring(0, Math.min(8, realPeerId.length())));
                     updatePeerCount();
 
                     connection.setDisconnectHandler(disconnected -> {
@@ -715,19 +730,29 @@ public class MainFrame extends JFrame {
                         // message
                     });
 
+                    // Gửi HELLO để peer kia biết peerId của mình
+                    connection.sendMessage(new NetworkProtocol.Message(
+                            NetworkProtocol.MessageType.HELLO, peerId, null));
+
                     if (!canvas.getAllShapes().isEmpty()) {
                         connection.sendMessage(new NetworkProtocol.Message(
                                 NetworkProtocol.MessageType.SHAPES, peerId,
                                 new NetworkProtocol.ShapeData(canvas.getAllShapes(),
                                         System.currentTimeMillis())));
-                        System.out.println("[MainFrame] Sent initial SHAPES sync to " + remotePeerId);
+                        System.out.println("[MainFrame] Sent initial SHAPES sync to " + realPeerId);
                     }
                 } catch (IOException e) {
                     System.err.println("Connection error: " + e.getMessage());
                 }
             }
+        } catch (java.net.SocketException e) {
+            if (serverSocket != null && serverSocket.isClosed()) {
+                System.out.println("[MainFrame] Server socket closed normally");
+            } else {
+                System.err.println("[MainFrame] Server socket error: " + e.getMessage());
+            }
         } catch (IOException e) {
-            System.err.println("Server error: " + e.getMessage());
+            System.err.println("[MainFrame] Server error: " + e.getMessage());
         }
     }
 

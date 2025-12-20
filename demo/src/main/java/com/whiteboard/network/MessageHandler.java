@@ -73,7 +73,8 @@ public class MessageHandler {
     }
 
     private void handleHello(NetworkProtocol.Message message) {
-        System.out.println("Peer connected: " + message.senderId);
+        System.out.println("[MessageHandler] Peer connected: " + message.senderId);
+        // Khi nhận HELLO, có thể cập nhật peerId nếu cần (hiện tại đã match từ UDP discovery)
     }
 
     public void broadcastShapes(List<Shape> shapes, String senderId) throws Exception {
