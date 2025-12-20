@@ -694,9 +694,8 @@ public class MainFrame extends JFrame {
                     connection.setDisconnectHandler(disconnected -> {
                         messageHandler.removeConnection(disconnected);
                         updatePeerCount();
-                        if (!isHost && messageHandler.getConnectionCount() == 0) {
-                            handleRemoteRoomDisconnect("ROOM_CLOSED");
-                        }
+                        // Không tự động coi là ROOM_CLOSED khi socket ngắt; chỉ khi nhận DISCONNECT
+                        // message
                     });
 
                     if (!canvas.getAllShapes().isEmpty()) {
@@ -789,9 +788,8 @@ public class MainFrame extends JFrame {
                     messageHandler.removeConnection(disconnected);
                     updatePeerCount();
                     connectionStatusLabel.setText("🔴 Disconnected");
-                    if (!isHost && messageHandler.getConnectionCount() == 0) {
-                        handleRemoteRoomDisconnect("ROOM_CLOSED");
-                    }
+                    // Không tự động coi là ROOM_CLOSED khi socket ngắt; chỉ khi nhận DISCONNECT
+                    // message
                 });
             } catch (IOException e) {
                 System.err.println("[MainFrame] Failed to connect to peer " + peerInfo + ": " + e.getMessage());
