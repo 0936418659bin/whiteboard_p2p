@@ -66,7 +66,11 @@ public class MessageHandler {
             case DISCONNECT:
                 if (onDisconnectReceived != null) {
                     String reason = (message.data instanceof String) ? (String) message.data : "";
+                    System.out.println("[MessageHandler] Received DISCONNECT message from " 
+                            + message.senderId + " with reason: " + reason);
                     onDisconnectReceived.accept(reason);
+                } else {
+                    System.err.println("[MessageHandler] DISCONNECT received but no callback registered!");
                 }
                 break;
         }

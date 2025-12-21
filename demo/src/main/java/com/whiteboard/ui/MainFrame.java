@@ -854,12 +854,26 @@ public class MainFrame extends JFrame {
 
         // nếu là host, thông báo cho tất cả peers còn lại rằng phòng đã đóng
         if (isHost && messageHandler != null) {
+            int peerCount = messageHandler.getConnectionCount();
+            System.out.println("[MainFrame] Host leaving room, sending ROOM_CLOSED to "
+                    + peerCount + " peer(s)");
             for (PeerConnection conn : messageHandler.getConnections()) {
                 try {
                     conn.sendMessage(new NetworkProtocol.Message(
                             NetworkProtocol.MessageType.DISCONNECT, peerId, "ROOM_CLOSED"));
-                } catch (IOException ignored) {
+                    conn.flush(); // Force flush để đảm bảo message được gửi ngay
+                    System.out.println("[MainFrame] Sent ROOM_CLOSED to peer " + conn.getPeerId());
+                } catch (IOException e) {
+                    System.err.println(
+                            "[MainFrame] Failed to send ROOM_CLOSED to " + conn.getPeerId() + ": " + e.getMessage());
                 }
+            }
+            // Đợi một chút để message được flush và gửi qua network
+            try {
+                Thread.sleep(500); // 500ms để đảm bảo message được gửi
+                System.out.println("[MainFrame] Waited for messages to be sent");
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
             }
         }
 
@@ -958,6 +972,7 @@ public class MainFrame extends JFrame {
      * Xử lý khi host gửi tín hiệu đóng phòng hoặc kick.
      */
     private void handleRemoteRoomDisconnect(String reason) {
+        System.out.println("[MainFrame] Received DISCONNECT message with reason: " + reason);
         String message;
         if ("ROOM_CLOSED".equals(reason)) {
             message = "Chủ phòng đã đóng phòng. Bạn sẽ được đưa về màn hình chọn phòng.";
@@ -966,6 +981,7 @@ public class MainFrame extends JFrame {
         } else {
             message = "Bạn đã bị ngắt kết nối khỏi phòng.";
         }
+        System.out.println("[MainFrame] Showing disconnect dialog: " + message);
         JOptionPane.showMessageDialog(this, message, "Room Closed",
                 JOptionPane.INFORMATION_MESSAGE);
 
@@ -1019,12 +1035,27 @@ public class MainFrame extends JFrame {
     private void shutdown() {
         // nếu là host, thông báo đóng phòng cho các peers
         if (isHost && messageHandler != null) {
+            int peerCount = messageHandler.getConnectionCount();
+            System.out.println("[MainFrame] Host shutting down, sending ROOM_CLOSED to "
+                    + peerCount + " peer(s)");
             for (PeerConnection conn : messageHandler.getConnections()) {
                 try {
                     conn.sendMessage(new NetworkProtocol.Message(
                             NetworkProtocol.MessageType.DISCONNECT, peerId, "ROOM_CLOSED"));
-                } catch (IOException ignored) {
+                    conn.flush(); // Force flush để đảm bảo message được gửi ngay
+                    System.out.println("[MainFrame] Sent ROOM_CLOSED to peer " + conn.getPeerId());
+                } catch (IOException e) {
+                    System.err.println(
+                            "[MainFrame] Failed to send ROOM_CLOSED to " + conn.getPeerId() + ": " + e.getMessage());
                 }
+            }
+            // Đợi một chút để message được flush và gửi qua network trước khi đóng
+            // connection
+            try {
+                Thread.sleep(500); // 500ms để đảm bảo message được gửi
+                System.out.println("[MainFrame] Waited for messages to be sent, closing connections...");
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
             }
         }
 

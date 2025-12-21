@@ -112,6 +112,22 @@ public class PeerConnection {
         }
         messageQueue.offer(message);
     }
+    
+    /**
+     * Force flush output stream để đảm bảo message được gửi ngay lập tức.
+     * Dùng cho các message quan trọng như DISCONNECT.
+     */
+    public void flush() {
+        synchronized (objectOutputStream) {
+            try {
+                if (objectOutputStream != null && isConnected) {
+                    objectOutputStream.flush();
+                }
+            } catch (IOException e) {
+                System.err.println("[PeerConnection] Error flushing stream: " + e.getMessage());
+            }
+        }
+    }
 
     public void setMessageHandler(Consumer<NetworkProtocol.Message> handler) {
         this.messageHandler = handler;

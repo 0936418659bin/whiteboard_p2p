@@ -7,7 +7,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 
 public class PeerDiscovery {
-    private static final String BROADCAST_ADDRESS = "192.168.1.99";
+    private static final String BROADCAST_ADDRESS = "172.16.0.232";
     private static final int BROADCAST_PORT = 55556;
 
     private final String peerId;
