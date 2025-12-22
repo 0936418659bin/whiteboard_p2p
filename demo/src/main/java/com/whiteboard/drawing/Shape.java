@@ -10,7 +10,7 @@ public class Shape implements Serializable, Cloneable {
     
     public enum ShapeType {
         POINT, LINE, RECTANGLE, CIRCLE, ELLIPSE, FREE_DRAW, TEXT,
-        POLYGON, STAR, ARROW, CURVE, FILL
+        POLYGON, STAR, ARROW, CURVE, FILL, IMAGE
     }
 
     // Public properties cho dễ truy cập

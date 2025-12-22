@@ -11,6 +11,8 @@ import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
+import java.awt.image.BufferedImage;
+import java.io.File;
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -31,6 +33,7 @@ public class MainFrame extends JFrame {
     private ZoomPanel zoomPanel;
     private GridPanel gridPanel;
     private AdvancedToolsPanel advancedToolsPanel;
+    private ChatPanel chatPanel;
 
     private JLabel connectionStatusLabel;
     private JLabel peerCountLabel;
@@ -232,6 +235,9 @@ public class MainFrame extends JFrame {
         rightTabs.addTab("Colors", colorPanel);
         rightTabs.addTab("File", filePanel);
         rightTabs.addTab("Peers", createPeersPanel());
+        // Chat tab (kept compact so it doesn't disrupt canvas layout)
+        chatPanel = new ChatPanel();
+        rightTabs.addTab("Chat", chatPanel);
         rightTabs.addTab("Grid", gridPanel);
         rightTabs.setPreferredSize(new Dimension(250, 0));
 
@@ -253,34 +259,186 @@ public class MainFrame extends JFrame {
 
             @Override
             public void onSaveProject(String filePath) {
+                System.out.println("[MainFrame] Save project requested: " + filePath);
+                List<com.whiteboard.drawing.Shape> allShapes = canvas.getAllShapes();
+                System.out.println("[MainFrame] Total shapes to save: " + allShapes.size());
+
                 FileManager.ProjectData data = new FileManager.ProjectData("Drawing",
-                        canvas.getWidth(), canvas.getHeight());
-                data.shapes = canvas.getAllShapes();
+                        canvas.getPreferredSize().width, canvas.getPreferredSize().height);
+                data.shapes = allShapes;
                 data.layers = canvas.getLayerManager().getAllLayers();
-                FileManager.saveProjectAsJSON(filePath, data);
-                JOptionPane.showMessageDialog(MainFrame.this, "Project saved!");
+
+                System.out.println("[MainFrame] ProjectData created - shapes: " +
+                        (data.shapes != null ? data.shapes.size() : 0) +
+                        ", layers: " + (data.layers != null ? data.layers.size() : 0));
+
+                if (FileManager.saveProjectAsJSON(filePath, data)) {
+                    File savedFile = new File(filePath);
+                    String message = "Project saved successfully!\n\n" +
+                            "File: " + savedFile.getName() + "\n" +
+                            "Path: " + savedFile.getAbsolutePath() + "\n" +
+                            "Size: " + savedFile.length() + " bytes\n" +
+                            "Shapes: " + allShapes.size();
+                    JOptionPane.showMessageDialog(MainFrame.this, message, "Save Success",
+                            JOptionPane.INFORMATION_MESSAGE);
+                } else {
+                    JOptionPane.showMessageDialog(MainFrame.this,
+                            "Failed to save project!\n\nCheck console for details.",
+                            "Error", JOptionPane.ERROR_MESSAGE);
+                }
             }
 
             @Override
             public void onLoadProject(String filePath) {
+                System.out.println("[MainFrame] Load project requested: " + filePath);
                 FileManager.ProjectData data = FileManager.loadProjectFromJSON(filePath);
-                if (data != null && data.shapes != null) {
+
+                if (data == null) {
+                    System.err.println("[MainFrame] Failed to load project - data is null");
+                    JOptionPane.showMessageDialog(MainFrame.this,
+                            "Failed to load project!\n\nFile may be corrupted or in unsupported format.\n" +
+                                    "Check console for details.",
+                            "Error", JOptionPane.ERROR_MESSAGE);
+                    return;
+                }
+
+                System.out.println("[MainFrame] ProjectData loaded - shapes: " +
+                        (data.shapes != null ? data.shapes.size() : 0));
+
+                if (data.shapes != null && !data.shapes.isEmpty()) {
+                    System.out.println("[MainFrame] Loading " + data.shapes.size() + " shapes into canvas...");
                     canvas.loadShapes(data.shapes);
-                    JOptionPane.showMessageDialog(MainFrame.this, "Project loaded!");
+                    System.out.println("[MainFrame] Shapes loaded. Canvas now has: " +
+                            canvas.getAllShapes().size() + " shapes");
+
+                    JOptionPane.showMessageDialog(MainFrame.this,
+                            "Project loaded successfully!\n\n" +
+                                    "Shapes: " + data.shapes.size() + "\n" +
+                                    "Canvas: " + data.canvasWidth + "x" + data.canvasHeight,
+                            "Load Success", JOptionPane.INFORMATION_MESSAGE);
+                } else {
+                    System.err.println("[MainFrame] No shapes in loaded project");
+                    JOptionPane.showMessageDialog(MainFrame.this,
+                            "Project loaded but contains no shapes!\n\n" +
+                                    "The file may be empty or corrupted.",
+                            "Warning", JOptionPane.WARNING_MESSAGE);
                 }
             }
 
             @Override
             public void onExportPNG(String filePath) {
-                FileManager.exportAsPNG(filePath, canvas.getCanvasImage());
-                JOptionPane.showMessageDialog(MainFrame.this, "Exported as PNG!");
+                System.out.println("[MainFrame] Export PNG requested: " + filePath);
+                BufferedImage image = canvas.getCanvasImage();
+                if (image == null) {
+                    System.err.println("[MainFrame] Canvas image is null!");
+                    JOptionPane.showMessageDialog(MainFrame.this,
+                            "Failed to export PNG!\n\nCanvas image is null.",
+                            "Error", JOptionPane.ERROR_MESSAGE);
+                    return;
+                }
+
+                if (FileManager.exportAsPNG(filePath, image)) {
+                    File exportedFile = new File(filePath);
+                    String message = "PNG exported successfully!\n\n" +
+                            "File: " + exportedFile.getName() + "\n" +
+                            "Path: " + exportedFile.getAbsolutePath() + "\n" +
+                            "Size: " + exportedFile.length() + " bytes\n" +
+                            "Image: " + image.getWidth() + "x" + image.getHeight();
+                    JOptionPane.showMessageDialog(MainFrame.this, message, "Export Success",
+                            JOptionPane.INFORMATION_MESSAGE);
+                } else {
+                    JOptionPane.showMessageDialog(MainFrame.this,
+                            "Failed to export PNG!\n\nCheck console for details.",
+                            "Error", JOptionPane.ERROR_MESSAGE);
+                }
             }
 
             @Override
             public void onExportSVG(String filePath) {
-                FileManager.exportAsSVG(filePath, canvas.getAllShapes(),
-                        canvas.getWidth(), canvas.getHeight());
-                JOptionPane.showMessageDialog(MainFrame.this, "Exported as SVG!");
+                System.out.println("[MainFrame] Export SVG requested: " + filePath);
+                List<com.whiteboard.drawing.Shape> shapes = canvas.getAllShapes();
+                System.out.println("[MainFrame] Exporting " + shapes.size() + " shapes to SVG");
+
+                if (FileManager.exportAsSVG(filePath, shapes,
+                        canvas.getPreferredSize().width, canvas.getPreferredSize().height)) {
+                    File exportedFile = new File(filePath);
+                    String message = "SVG exported successfully!\n\n" +
+                            "File: " + exportedFile.getName() + "\n" +
+                            "Path: " + exportedFile.getAbsolutePath() + "\n" +
+                            "Size: " + exportedFile.length() + " bytes\n" +
+                            "Shapes: " + shapes.size();
+                    JOptionPane.showMessageDialog(MainFrame.this, message, "Export Success",
+                            JOptionPane.INFORMATION_MESSAGE);
+                } else {
+                    JOptionPane.showMessageDialog(MainFrame.this,
+                            "Failed to export SVG!\n\nCheck console for details.",
+                            "Error", JOptionPane.ERROR_MESSAGE);
+                }
+            }
+
+            @Override
+            public void onImportImage(String filePath) {
+                BufferedImage image = FileManager.importImage(filePath);
+                if (image != null) {
+                    // Hỏi user muốn đặt image ở đâu
+                    String[] options = { "Top Left (0,0)", "Center", "Custom Position" };
+                    int choice = JOptionPane.showOptionDialog(MainFrame.this,
+                            "Image imported successfully!\n" +
+                                    "Size: " + image.getWidth() + "x" + image.getHeight() + "\n\n" +
+                                    "Where do you want to place the image?",
+                            "Import Image",
+                            JOptionPane.DEFAULT_OPTION,
+                            JOptionPane.QUESTION_MESSAGE,
+                            null,
+                            options,
+                            options[0]);
+
+                    int x = -1, y = -1;
+                    if (choice == 0) {
+                        // Top Left
+                        x = 0;
+                        y = 0;
+                    } else if (choice == 1) {
+                        // Center
+                        int canvasWidth = canvas.getPreferredSize().width;
+                        int canvasHeight = canvas.getPreferredSize().height;
+                        x = (canvasWidth - image.getWidth()) / 2;
+                        y = (canvasHeight - image.getHeight()) / 2;
+                    } else if (choice == 2) {
+                        // Custom Position - hỏi user nhập x, y
+                        String xStr = JOptionPane.showInputDialog(MainFrame.this,
+                                "Enter X position:", "0");
+                        String yStr = JOptionPane.showInputDialog(MainFrame.this,
+                                "Enter Y position:", "0");
+                        try {
+                            x = Integer.parseInt(xStr != null ? xStr : "0");
+                            y = Integer.parseInt(yStr != null ? yStr : "0");
+                        } catch (NumberFormatException e) {
+                            x = 0;
+                            y = 0;
+                        }
+                    } else {
+                        // User cancelled
+                        return;
+                    }
+
+                    // Import image vào canvas
+                    canvas.importImage(image, x, y);
+
+                    JOptionPane.showMessageDialog(MainFrame.this,
+                            "Image placed at (" + x + ", " + y + ")\n" +
+                                    "You can draw on top of it!",
+                            "Import Image",
+                            JOptionPane.INFORMATION_MESSAGE);
+                } else {
+                    JOptionPane.showMessageDialog(MainFrame.this,
+                            "Failed to import image!\n\n" +
+                                    "Please check:\n" +
+                                    "- File exists\n" +
+                                    "- File is a valid image format (PNG, JPG, GIF, BMP)",
+                            "Error",
+                            JOptionPane.ERROR_MESSAGE);
+                }
             }
         });
     }
@@ -598,6 +756,21 @@ public class MainFrame extends JFrame {
         messageHandler.setOnDisconnectReceived(
                 reason -> SwingUtilities.invokeLater(() -> handleRemoteRoomDisconnect(reason)));
 
+        // Chat messages
+        messageHandler.setOnChatReceived(chat -> {
+            if (chat == null) return;
+            SwingUtilities.invokeLater(() -> {
+                // ensure peer is registered in the list
+                if (chat.senderId != null) {
+                    registerPeer(chat.senderId, chat.senderName != null ? chat.senderName : ("Peer-" + chat.senderId));
+                    updatePeerCount();
+                }
+                if (chatPanel != null) {
+                    chatPanel.addMessage(chat);
+                }
+            });
+        });
+
         // Realtime: gửi trực tiếp shape đang vẽ mỗi khi canvas cập nhật
         canvas.setOnShapeDrawn(shape -> {
             try {
@@ -642,6 +815,22 @@ public class MainFrame extends JFrame {
             peerDiscovery.start();
         } catch (IOException e) {
             System.err.println("Failed to start discovery: " + e.getMessage());
+        }
+
+        // Hook chat send action to broadcast via MessageHandler
+        if (chatPanel != null) {
+            chatPanel.setOnSend(text -> {
+                try {
+                    if (messageHandler != null) {
+                        messageHandler.broadcastChat(text, peerId, peerName);
+                    }
+                    // show local message immediately
+                    NetworkProtocol.ChatMessage local = new NetworkProtocol.ChatMessage(peerId, peerName, text);
+                    chatPanel.addMessage(local);
+                } catch (Exception ex) {
+                    System.err.println("Failed to send chat: " + ex.getMessage());
+                }
+            });
         }
 
         // Nếu user chọn JOIN room thì bắt buộc phải có ít nhất 1 kết nối TCP

@@ -8,6 +8,7 @@ public class NetworkProtocol {
     public enum MessageType {
         HELLO, // Initial connection
         SHAPES, // Drawing data
+        CHAT, // Chat message between peers
         ACK, // Acknowledgment
         SYNC_REQUEST, // Request full state
         SYNC_RESPONSE, // Full state response
@@ -78,6 +79,25 @@ public class NetworkProtocol {
         @Override
         public String toString() {
             return String.format("%s (%s) - %s", name, peerId, ipAddress);
+        }
+    }
+
+    public static class ChatMessage implements Serializable {
+        public String senderId;
+        public String senderName;
+        public String text;
+        public long timestamp;
+
+        public ChatMessage(String senderId, String senderName, String text) {
+            this.senderId = senderId;
+            this.senderName = senderName;
+            this.text = text;
+            this.timestamp = System.currentTimeMillis();
+        }
+
+        @Override
+        public String toString() {
+            return String.format("[%s] %s: %s", new java.util.Date(timestamp), senderName, text);
         }
     }
 }

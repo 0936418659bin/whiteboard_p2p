@@ -12,6 +12,7 @@ public class MessageHandler {
     private Consumer<String> onUndoReceived;
     private Consumer<List<NetworkProtocol.PeerInfo>> onPeerListReceived;
     private Consumer<String> onDisconnectReceived;
+    private Consumer<NetworkProtocol.ChatMessage> onChatReceived;
 
     public MessageHandler() {
         this.connections = new ConcurrentHashMap<>();
@@ -37,6 +38,11 @@ public class MessageHandler {
             case SHAPES:
                 if (onShapesReceived != null && message.data instanceof NetworkProtocol.ShapeData) {
                     onShapesReceived.accept((NetworkProtocol.ShapeData) message.data);
+                }
+                break;
+            case CHAT:
+                if (onChatReceived != null && message.data instanceof NetworkProtocol.ChatMessage) {
+                    onChatReceived.accept((NetworkProtocol.ChatMessage) message.data);
                 }
                 break;
             case CLEAR:
@@ -73,6 +79,22 @@ public class MessageHandler {
                     System.err.println("[MessageHandler] DISCONNECT received but no callback registered!");
                 }
                 break;
+        }
+    }
+
+    public void broadcastChat(String text, String senderId, String senderName) throws Exception {
+        NetworkProtocol.ChatMessage chat = new NetworkProtocol.ChatMessage(senderId, senderName, text);
+        NetworkProtocol.Message message = new NetworkProtocol.Message(
+                NetworkProtocol.MessageType.CHAT, senderId, chat);
+
+        for (PeerConnection connection : connections.values()) {
+            if (!connection.getPeerId().equals(senderId)) {
+                try {
+                    connection.sendMessage(message);
+                } catch (Exception e) {
+                    System.err.println("Failed to send chat to " + connection.getPeerId());
+                }
+            }
         }
     }
 
@@ -144,6 +166,10 @@ public class MessageHandler {
 
     public void setOnPeerListReceived(Consumer<List<NetworkProtocol.PeerInfo>> callback) {
         this.onPeerListReceived = callback;
+    }
+
+    public void setOnChatReceived(Consumer<NetworkProtocol.ChatMessage> callback) {
+        this.onChatReceived = callback;
     }
 
     public void setOnDisconnectReceived(Consumer<String> callback) {

@@ -33,6 +33,50 @@ public class DrawingCanvas extends JPanel {
     // Debounce repaint cho remote updates để giảm lag
     private Timer repaintTimer;
     private volatile boolean pendingRepaint = false;
+    // Background image (imported image)
+    private BufferedImage backgroundImage;
+    private int backgroundImageX, backgroundImageY;
+    private int backgroundImageWidth, backgroundImageHeight; // Current display size
+    private boolean imageSelected = false;
+    private boolean imageResizing = false;
+    private int resizeHandle = -1; // 0=NW, 1=NE, 2=SW, 3=SE, 4=N, 5=S, 6=W, 7=E
+    private int imageDragStartX, imageDragStartY;
+    // Lưu original size và position khi bắt đầu resize
+    private int resizeStartX, resizeStartY, resizeStartWidth, resizeStartHeight;
+    // Image history để undo/redo
+    private java.util.LinkedList<ImageState> imageHistory = new java.util.LinkedList<>();
+    private java.util.LinkedList<ImageState> imageRedoHistory = new java.util.LinkedList<>();
+    
+    /**
+     * Class để lưu trạng thái image cho undo/redo
+     */
+    private static class ImageState {
+        BufferedImage image;
+        int x, y, width, height;
+        boolean hasImage;
+        
+        ImageState(BufferedImage img, int x, int y, int w, int h, boolean has) {
+            this.image = img;
+            this.x = x;
+            this.y = y;
+            this.width = w;
+            this.height = h;
+            this.hasImage = has;
+        }
+        
+        ImageState copy() {
+            BufferedImage imgCopy = image != null ? deepCopyImage(image) : null;
+            return new ImageState(imgCopy, x, y, width, height, hasImage);
+        }
+        
+        private BufferedImage deepCopyImage(BufferedImage original) {
+            BufferedImage copy = new BufferedImage(original.getWidth(), original.getHeight(), original.getType());
+            Graphics2D g = copy.createGraphics();
+            g.drawImage(original, 0, 0, null);
+            g.dispose();
+            return copy;
+        }
+    }
 
     public DrawingCanvas(String peerId) {
         this.peerId = peerId;
@@ -77,6 +121,23 @@ public class DrawingCanvas extends JPanel {
         addMouseMotionListener(new MouseMotionAdapter() {
             @Override
             public void mouseDragged(MouseEvent e) {
+                // Handle image resize/move first
+                if (imageSelected && backgroundImage != null) {
+                    int canvasX = zoomManager.screenToCanvasX(e.getX());
+                    int canvasY = zoomManager.screenToCanvasY(e.getY());
+                    
+                    if (imageResizing) {
+                        // Resize image
+                        resizeImage(canvasX, canvasY);
+                    } else {
+                        // Move image
+                        backgroundImageX = canvasX - imageDragStartX;
+                        backgroundImageY = canvasY - imageDragStartY;
+                        repaint();
+                    }
+                    return;
+                }
+                
                 updateDrawing(e);
             }
 
@@ -84,10 +145,37 @@ public class DrawingCanvas extends JPanel {
             public void mouseMoved(MouseEvent e) {
                 lastMouseX = e.getX();
                 lastMouseY = e.getY();
-
-                // hover: show tooltip với thông tin peer của shape dưới con trỏ
+                
                 int canvasX = zoomManager.screenToCanvasX(e.getX());
                 int canvasY = zoomManager.screenToCanvasY(e.getY());
+                
+                // Update cursor khi hover vào image resize handles
+                if (backgroundImage != null && imageSelected) {
+                    int imgX = backgroundImageX;
+                    int imgY = backgroundImageY;
+                    int imgW = backgroundImageWidth > 0 ? backgroundImageWidth : backgroundImage.getWidth();
+                    int imgH = backgroundImageHeight > 0 ? backgroundImageHeight : backgroundImage.getHeight();
+                    
+                    int handle = getResizeHandleAt(canvasX, canvasY, imgX, imgY, imgW, imgH);
+                    if (handle >= 0) {
+                        // Set cursor dựa trên handle
+                        Cursor cursor = getResizeCursor(handle);
+                        setCursor(cursor);
+                        setToolTipText(null);
+                        return;
+                    } else if (canvasX >= imgX && canvasX <= imgX + imgW && 
+                               canvasY >= imgY && canvasY <= imgY + imgH) {
+                        // Hover vào image nhưng không phải handle - cursor move
+                        setCursor(new Cursor(Cursor.MOVE_CURSOR));
+                        setToolTipText(null);
+                        return;
+                    }
+                }
+
+                // Reset cursor nếu không hover vào image
+                setCursor(new Cursor(Cursor.DEFAULT_CURSOR));
+
+                // hover: show tooltip với thông tin peer của shape dưới con trỏ
                 Shape hovered = findShapeAt(canvasX, canvasY);
                 if (hovered != null && hovered.peerId != null && !hovered.peerId.isEmpty()) {
                     String shortId = hovered.peerId.length() > 4
@@ -201,6 +289,52 @@ public class DrawingCanvas extends JPanel {
         
         int canvasX = zoomManager.screenToCanvasX(e.getX());
         int canvasY = zoomManager.screenToCanvasY(e.getY());
+
+        // Kiểm tra click vào background image
+        if (backgroundImage != null) {
+            int imgX = backgroundImageX;
+            int imgY = backgroundImageY;
+            int imgW = backgroundImageWidth > 0 ? backgroundImageWidth : backgroundImage.getWidth();
+            int imgH = backgroundImageHeight > 0 ? backgroundImageHeight : backgroundImage.getHeight();
+            
+            if (canvasX >= imgX && canvasX <= imgX + imgW && 
+                canvasY >= imgY && canvasY <= imgY + imgH) {
+                // Click vào image - check resize handles hoặc move
+                int handle = getResizeHandleAt(canvasX, canvasY, imgX, imgY, imgW, imgH);
+                if (handle >= 0) {
+                    // Click vào resize handle
+                    System.out.println("[DrawingCanvas] Image resize handle clicked: " + handle);
+                    imageSelected = true;
+                    imageResizing = true;
+                    resizeHandle = handle;
+                    // Lưu original size và position khi bắt đầu resize
+                    resizeStartX = backgroundImageX;
+                    resizeStartY = backgroundImageY;
+                    resizeStartWidth = backgroundImageWidth > 0 ? backgroundImageWidth : backgroundImage.getWidth();
+                    resizeStartHeight = backgroundImageHeight > 0 ? backgroundImageHeight : backgroundImage.getHeight();
+                    imageDragStartX = canvasX; // Vị trí click ban đầu
+                    imageDragStartY = canvasY;
+                    System.out.println("[DrawingCanvas] Resize start - pos: (" + resizeStartX + "," + resizeStartY + 
+                            "), size: " + resizeStartWidth + "x" + resizeStartHeight);
+                    repaint();
+                    return;
+                } else {
+                    // Click vào image - start moving
+                    System.out.println("[DrawingCanvas] Image move started");
+                    imageSelected = true;
+                    imageResizing = false;
+                    imageDragStartX = canvasX - imgX;
+                    imageDragStartY = canvasY - imgY;
+                    repaint();
+                    return;
+                }
+            } else {
+                // Click outside image - deselect
+                imageSelected = false;
+                imageResizing = false;
+                repaint();
+            }
+        }
 
         if (tool.getCurrentTool() == DrawingTool.Tool.PAN) {
             // PAN mode: trước tiên kiểm tra xem click trúng shape nào không để hiển thị thông tin peer
@@ -362,6 +496,24 @@ public class DrawingCanvas extends JPanel {
         g2.translate(zoomManager.getPanX(), zoomManager.getPanY());
         g2.scale(zoomManager.getZoom(), zoomManager.getZoom());
 
+        // Draw background image first (if exists)
+        if (backgroundImage != null) {
+            int imgW = backgroundImageWidth > 0 ? backgroundImageWidth : backgroundImage.getWidth();
+            int imgH = backgroundImageHeight > 0 ? backgroundImageHeight : backgroundImage.getHeight();
+            
+            g2.drawImage(backgroundImage, backgroundImageX, backgroundImageY, imgW, imgH, null);
+            
+            // Draw selection border and resize handles if selected
+            if (imageSelected) {
+                g2.setColor(new Color(0, 120, 215)); // Blue selection color
+                g2.setStroke(new BasicStroke(2.0f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+                g2.drawRect(backgroundImageX, backgroundImageY, imgW, imgH);
+                
+                // Draw resize handles
+                drawResizeHandles(g2, backgroundImageX, backgroundImageY, imgW, imgH);
+            }
+        }
+
         for (LayerManager.Layer layer : layerManager.getAllLayers()) {
             if (!layer.visible) continue;
 
@@ -438,6 +590,13 @@ public class DrawingCanvas extends JPanel {
     }
 
     public void deleteSelection() {
+        // Nếu đang select image thì xóa image
+        if (imageSelected && backgroundImage != null) {
+            deleteImage();
+            return;
+        }
+        
+        // Xóa các shapes được select
         for (Shape shape : selectionManager.getSelectedShapes()) {
             layerManager.removeShapeFromActiveLayer(shape);
         }
@@ -446,6 +605,19 @@ public class DrawingCanvas extends JPanel {
     }
 
     public void undo() {
+        // Undo image trước (nếu có)
+        if (!imageHistory.isEmpty()) {
+            ImageState currentState = new ImageState(backgroundImage, backgroundImageX, backgroundImageY,
+                    backgroundImageWidth, backgroundImageHeight, backgroundImage != null);
+            imageRedoHistory.addFirst(currentState);
+            
+            ImageState prevState = imageHistory.removeLast();
+            restoreImageState(prevState);
+            repaint();
+            return; // Undo image thì không undo shape
+        }
+        
+        // Undo shape
         Shape lastShape = history.undo();
         if (lastShape != null) {
             layerManager.removeShapeFromActiveLayer(lastShape);
@@ -474,10 +646,55 @@ public class DrawingCanvas extends JPanel {
     }
 
     public void redo() {
+        // Redo image trước (nếu có)
+        if (!imageRedoHistory.isEmpty()) {
+            ImageState currentState = new ImageState(backgroundImage, backgroundImageX, backgroundImageY,
+                    backgroundImageWidth, backgroundImageHeight, backgroundImage != null);
+            imageHistory.addLast(currentState);
+            
+            ImageState nextState = imageRedoHistory.removeFirst();
+            restoreImageState(nextState);
+            repaint();
+            return; // Redo image thì không redo shape
+        }
+        
+        // Redo shape
         Shape redoShape = history.redo();
         if (redoShape != null) {
             layerManager.addShapeToActiveLayer(redoShape);
             repaint();
+        }
+    }
+    
+    /**
+     * Restore image state từ ImageState
+     */
+    private void restoreImageState(ImageState state) {
+        if (state.hasImage && state.image != null) {
+            this.backgroundImage = state.image;
+            this.backgroundImageX = state.x;
+            this.backgroundImageY = state.y;
+            this.backgroundImageWidth = state.width;
+            this.backgroundImageHeight = state.height;
+            this.imageSelected = true;
+        } else {
+            this.backgroundImage = null;
+            this.imageSelected = false;
+        }
+    }
+    
+    /**
+     * Save current image state vào history
+     */
+    private void saveImageState() {
+        ImageState state = new ImageState(backgroundImage, backgroundImageX, backgroundImageY,
+                backgroundImageWidth, backgroundImageHeight, backgroundImage != null);
+        imageHistory.addLast(state.copy());
+        imageRedoHistory.clear(); // Clear redo khi có action mới
+        
+        // Giới hạn history size
+        if (imageHistory.size() > 50) {
+            imageHistory.removeFirst();
         }
     }
 
@@ -560,8 +777,41 @@ public class DrawingCanvas extends JPanel {
         this.onShapeClicked = callback;
     }
 
+    /**
+     * Render tất cả shapes vào BufferedImage để export PNG.
+     * Tạo image mới với kích thước canvas và render tất cả shapes.
+     */
     public BufferedImage getCanvasImage() {
-        return canvas;
+        int width = getPreferredSize().width;
+        int height = getPreferredSize().height;
+        
+        BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+        Graphics2D g2d = image.createGraphics();
+        g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        
+        // Fill nền trắng
+        g2d.setColor(Color.WHITE);
+        g2d.fillRect(0, 0, width, height);
+        
+        // Render tất cả shapes từ layers
+        for (LayerManager.Layer layer : layerManager.getAllLayers()) {
+            if (!layer.visible) continue;
+            
+            float alpha = layer.opacity;
+            for (Shape shape : layer.shapes) {
+                if (shape == null) continue;
+                
+                Color color = shape.color;
+                if (alpha < 1.0f && color != null) {
+                    color = new Color(color.getRed(), color.getGreen(), color.getBlue(),
+                            (int) (color.getAlpha() * alpha));
+                }
+                shape.draw(g2d, color, shape.strokeWidth);
+            }
+        }
+        
+        g2d.dispose();
+        return image;
     }
 
     public void loadShapes(List<Shape> shapes) {
@@ -570,6 +820,283 @@ public class DrawingCanvas extends JPanel {
             layerManager.addShapeToActiveLayer(shape);
         }
         repaint();
+    }
+    
+    /**
+     * Import image và vẽ vào canvas tại vị trí (x, y)
+     * Nếu x, y = -1, sẽ đặt ở góc trên bên trái (0, 0)
+     */
+    public void importImage(BufferedImage image, int x, int y) {
+        if (image == null) {
+            System.err.println("Cannot import null image");
+            return;
+        }
+        
+        // Save current state để undo
+        if (backgroundImage != null) {
+            saveImageState();
+        }
+        
+        this.backgroundImage = image;
+        this.backgroundImageX = (x < 0) ? 0 : x;
+        this.backgroundImageY = (y < 0) ? 0 : y;
+        this.backgroundImageWidth = image.getWidth();
+        this.backgroundImageHeight = image.getHeight();
+        this.imageSelected = true; // Auto-select khi import
+        
+        // Save new state
+        saveImageState();
+        
+        // Repaint để hiển thị image
+        repaint();
+        
+        System.out.println("[DrawingCanvas] Image imported: " + image.getWidth() + "x" + image.getHeight() 
+                + " at (" + backgroundImageX + ", " + backgroundImageY + ")");
+    }
+    
+    /**
+     * Xóa background image
+     */
+    public void deleteImage() {
+        if (backgroundImage == null) {
+            return;
+        }
+        
+        // Save current state để undo
+        saveImageState();
+        
+        this.backgroundImage = null;
+        this.imageSelected = false;
+        this.imageResizing = false;
+        this.resizeHandle = -1;
+        
+        repaint();
+        
+        System.out.println("[DrawingCanvas] Image deleted");
+    }
+    
+    /**
+     * Kiểm tra xem điểm (x, y) có nằm trên resize handle không
+     * Returns: 0=NW, 1=NE, 2=SW, 3=SE, 4=N, 5=S, 6=W, 7=E, -1=none
+     */
+    private int getResizeHandleAt(int x, int y, int imgX, int imgY, int imgW, int imgH) {
+        int handleSize = 12; // Tăng size để dễ click hơn
+        int halfHandle = handleSize / 2;
+        
+        // Corner handles - kiểm tra trước để ưu tiên
+        if (Math.abs(x - imgX) <= halfHandle && Math.abs(y - imgY) <= halfHandle) {
+            System.out.println("[DrawingCanvas] Handle NW detected at (" + x + "," + y + ")");
+            return 0; // NW
+        }
+        if (Math.abs(x - (imgX + imgW)) <= halfHandle && Math.abs(y - imgY) <= halfHandle) {
+            System.out.println("[DrawingCanvas] Handle NE detected");
+            return 1; // NE
+        }
+        if (Math.abs(x - imgX) <= halfHandle && Math.abs(y - (imgY + imgH)) <= halfHandle) {
+            System.out.println("[DrawingCanvas] Handle SW detected");
+            return 2; // SW
+        }
+        if (Math.abs(x - (imgX + imgW)) <= halfHandle && Math.abs(y - (imgY + imgH)) <= halfHandle) {
+            System.out.println("[DrawingCanvas] Handle SE detected");
+            return 3; // SE
+        }
+        
+        // Edge handles
+        if (Math.abs(x - (imgX + imgW / 2)) <= halfHandle && Math.abs(y - imgY) <= halfHandle) {
+            System.out.println("[DrawingCanvas] Handle N detected");
+            return 4; // N
+        }
+        if (Math.abs(x - (imgX + imgW / 2)) <= halfHandle && Math.abs(y - (imgY + imgH)) <= halfHandle) {
+            System.out.println("[DrawingCanvas] Handle S detected");
+            return 5; // S
+        }
+        if (Math.abs(x - imgX) <= halfHandle && Math.abs(y - (imgY + imgH / 2)) <= halfHandle) {
+            System.out.println("[DrawingCanvas] Handle W detected");
+            return 6; // W
+        }
+        if (Math.abs(x - (imgX + imgW)) <= halfHandle && Math.abs(y - (imgY + imgH / 2)) <= halfHandle) {
+            System.out.println("[DrawingCanvas] Handle E detected");
+            return 7; // E
+        }
+        
+        return -1;
+    }
+    
+    /**
+     * Lấy cursor phù hợp cho resize handle
+     */
+    private Cursor getResizeCursor(int handle) {
+        switch (handle) {
+            case 0: // NW
+                return new Cursor(Cursor.NW_RESIZE_CURSOR);
+            case 1: // NE
+                return new Cursor(Cursor.NE_RESIZE_CURSOR);
+            case 2: // SW
+                return new Cursor(Cursor.SW_RESIZE_CURSOR);
+            case 3: // SE
+                return new Cursor(Cursor.SE_RESIZE_CURSOR);
+            case 4: // N
+                return new Cursor(Cursor.N_RESIZE_CURSOR);
+            case 5: // S
+                return new Cursor(Cursor.S_RESIZE_CURSOR);
+            case 6: // W
+                return new Cursor(Cursor.W_RESIZE_CURSOR);
+            case 7: // E
+                return new Cursor(Cursor.E_RESIZE_CURSOR);
+            default:
+                return new Cursor(Cursor.DEFAULT_CURSOR);
+        }
+    }
+    
+    /**
+     * Vẽ resize handles
+     */
+    private void drawResizeHandles(Graphics2D g2, int x, int y, int w, int h) {
+        g2.setColor(Color.WHITE);
+        g2.setStroke(new BasicStroke(1.0f));
+        
+        int handleSize = 8;
+        int halfHandle = handleSize / 2;
+        
+        // Corner handles
+        g2.fillRect(x - halfHandle, y - halfHandle, handleSize, handleSize);
+        g2.fillRect(x + w - halfHandle, y - halfHandle, handleSize, handleSize);
+        g2.fillRect(x - halfHandle, y + h - halfHandle, handleSize, handleSize);
+        g2.fillRect(x + w - halfHandle, y + h - halfHandle, handleSize, handleSize);
+        
+        // Edge handles
+        g2.fillRect(x + w / 2 - halfHandle, y - halfHandle, handleSize, handleSize);
+        g2.fillRect(x + w / 2 - halfHandle, y + h - halfHandle, handleSize, handleSize);
+        g2.fillRect(x - halfHandle, y + h / 2 - halfHandle, handleSize, handleSize);
+        g2.fillRect(x + w - halfHandle, y + h / 2 - halfHandle, handleSize, handleSize);
+        
+        // Draw border around handles
+        g2.setColor(new Color(0, 120, 215));
+        for (int i = 0; i < 8; i++) {
+            int hx = 0, hy = 0;
+            switch (i) {
+                case 0: hx = x; hy = y; break; // NW
+                case 1: hx = x + w; hy = y; break; // NE
+                case 2: hx = x; hy = y + h; break; // SW
+                case 3: hx = x + w; hy = y + h; break; // SE
+                case 4: hx = x + w / 2; hy = y; break; // N
+                case 5: hx = x + w / 2; hy = y + h; break; // S
+                case 6: hx = x; hy = y + h / 2; break; // W
+                case 7: hx = x + w; hy = y + h / 2; break; // E
+            }
+            g2.drawRect(hx - halfHandle, hy - halfHandle, handleSize, handleSize);
+        }
+    }
+    
+    /**
+     * Resize image dựa trên handle được kéo
+     */
+    private void resizeImage(int newX, int newY) {
+        if (backgroundImage == null || resizeHandle < 0) {
+            System.err.println("[DrawingCanvas] Cannot resize: image=" + (backgroundImage != null) + 
+                    ", handle=" + resizeHandle);
+            return;
+        }
+        
+        // Tính delta từ vị trí bắt đầu drag (trong canvas coordinates)
+        int deltaX = newX - imageDragStartX;
+        int deltaY = newY - imageDragStartY;
+        
+        // Tính scale factor dựa trên original size
+        double scaleX = 1.0;
+        double scaleY = 1.0;
+        
+        switch (resizeHandle) {
+            case 0: // NW - resize từ góc trên bên trái
+                scaleX = 1.0 - (double)deltaX / resizeStartWidth;
+                scaleY = 1.0 - (double)deltaY / resizeStartHeight;
+                break;
+            case 1: // NE - resize từ góc trên bên phải
+                scaleX = 1.0 + (double)deltaX / resizeStartWidth;
+                scaleY = 1.0 - (double)deltaY / resizeStartHeight;
+                break;
+            case 2: // SW - resize từ góc dưới bên trái
+                scaleX = 1.0 - (double)deltaX / resizeStartWidth;
+                scaleY = 1.0 + (double)deltaY / resizeStartHeight;
+                break;
+            case 3: // SE - resize từ góc dưới bên phải
+                scaleX = 1.0 + (double)deltaX / resizeStartWidth;
+                scaleY = 1.0 + (double)deltaY / resizeStartHeight;
+                break;
+            case 4: // N - resize từ cạnh trên
+                scaleY = 1.0 - (double)deltaY / resizeStartHeight;
+                break;
+            case 5: // S - resize từ cạnh dưới
+                scaleY = 1.0 + (double)deltaY / resizeStartHeight;
+                break;
+            case 6: // W - resize từ cạnh trái
+                scaleX = 1.0 - (double)deltaX / resizeStartWidth;
+                break;
+            case 7: // E - resize từ cạnh phải
+                scaleX = 1.0 + (double)deltaX / resizeStartWidth;
+                break;
+        }
+        
+        // Giới hạn scale tối thiểu và tối đa
+        scaleX = Math.max(0.1, Math.min(10.0, scaleX));
+        scaleY = Math.max(0.1, Math.min(10.0, scaleY));
+        
+        // Tính new size
+        int newW = (int)(resizeStartWidth * scaleX);
+        int newH = (int)(resizeStartHeight * scaleY);
+        
+        // Đảm bảo minimum size
+        newW = Math.max(10, newW);
+        newH = Math.max(10, newH);
+        
+        // Tính new position dựa trên anchor point
+        switch (resizeHandle) {
+            case 0: // NW - anchor ở SE
+                backgroundImageX = resizeStartX + resizeStartWidth - newW;
+                backgroundImageY = resizeStartY + resizeStartHeight - newH;
+                break;
+            case 1: // NE - anchor ở SW
+                backgroundImageY = resizeStartY + resizeStartHeight - newH;
+                break;
+            case 2: // SW - anchor ở NE
+                backgroundImageX = resizeStartX + resizeStartWidth - newW;
+                break;
+            case 3: // SE - anchor ở NW (không đổi position)
+                // Position giữ nguyên
+                break;
+            case 4: // N - anchor ở S
+                backgroundImageY = resizeStartY + resizeStartHeight - newH;
+                break;
+            case 5: // S - anchor ở N (không đổi Y)
+                // Y giữ nguyên
+                break;
+            case 6: // W - anchor ở E
+                backgroundImageX = resizeStartX + resizeStartWidth - newW;
+                break;
+            case 7: // E - anchor ở W (không đổi X)
+                // X giữ nguyên
+                break;
+        }
+        
+        backgroundImageWidth = newW;
+        backgroundImageHeight = newH;
+        
+        repaint();
+    }
+    
+    /**
+     * Xóa background image
+     */
+    public void clearBackgroundImage() {
+        this.backgroundImage = null;
+        repaint();
+    }
+    
+    /**
+     * Lấy background image
+     */
+    public BufferedImage getBackgroundImage() {
+        return backgroundImage;
     }
 
     private Shape findShapeAt(int x, int y) {

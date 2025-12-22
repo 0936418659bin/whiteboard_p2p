@@ -21,6 +21,7 @@ public class FilePanel extends JPanel {
         void onLoadProject(String filePath);
         void onExportPNG(String filePath);
         void onExportSVG(String filePath);
+        void onImportImage(String filePath);
     }
 
     public FilePanel() {
@@ -40,15 +41,14 @@ public class FilePanel extends JPanel {
         loadBtn = createButton("📂 Load", "Load project from JSON", e -> loadProject());
         exportPngBtn = createButton("🖼️ Export PNG", "Export as PNG image", e -> exportPNG());
         exportSvgBtn = createButton("⬆️ Export SVG", "Export as SVG vector", e -> exportSVG());
-
-        JButton recentBtn = createButton("⏱️ Recent", "Open recent files", e -> showRecent());
+        JButton importBtn = createButton("📥 Import Image", "Import image from file", e -> importImage());
 
         buttonPanel.add(newBtn);
         buttonPanel.add(saveBtn);
         buttonPanel.add(loadBtn);
         buttonPanel.add(exportPngBtn);
         buttonPanel.add(exportSvgBtn);
-        buttonPanel.add(recentBtn);
+        buttonPanel.add(importBtn);
 
         add(buttonPanel, BorderLayout.CENTER);
 
@@ -127,26 +127,17 @@ public class FilePanel extends JPanel {
         }
     }
 
-    private void showRecent() {
-        File[] recentFiles = FileManager.getRecentFiles(
-                System.getProperty("user.home") + "/whiteboard", 5);
+    private void importImage() {
+        JFileChooser chooser = new JFileChooser();
+        chooser.setFileFilter(new javax.swing.filechooser.FileNameExtensionFilter(
+                "Image Files", "png", "jpg", "jpeg", "gif", "bmp"));
+        chooser.setDialogTitle("Import Image");
 
-        if (recentFiles.length == 0) {
-            JOptionPane.showMessageDialog(this, "No recent files", 
-                    "Recent Files", JOptionPane.INFORMATION_MESSAGE);
-            return;
-        }
-
-        String[] options = new String[recentFiles.length];
-        for (int i = 0; i < recentFiles.length; i++) {
-            options[i] = recentFiles[i].getName();
-        }
-
-        int choice = JOptionPane.showOptionDialog(this, "Select a file:", "Recent Files",
-                JOptionPane.DEFAULT_OPTION, JOptionPane.PLAIN_MESSAGE, null, options, options[0]);
-
-        if (choice >= 0 && listener != null) {
-            listener.onLoadProject(recentFiles[choice].getAbsolutePath());
+        if (chooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
+            if (listener != null) {
+                listener.onImportImage(chooser.getSelectedFile().getAbsolutePath());
+                setStatus("Imported: " + chooser.getSelectedFile().getName());
+            }
         }
     }
 
