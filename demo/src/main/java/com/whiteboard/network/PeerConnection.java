@@ -3,6 +3,9 @@ package com.whiteboard.network;
 import java.io.*;
 import java.net.Socket;
 import java.net.SocketException;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.function.Consumer;
@@ -11,6 +14,7 @@ public class PeerConnection {
     private final Socket socket;
     private final String peerId;
     private final BlockingQueue<NetworkProtocol.Message> messageQueue;
+    private final Set<String> sentMessageIds = Collections.synchronizedSet(new HashSet<>());
     private ObjectInputStream objectInputStream;
     private ObjectOutputStream objectOutputStream;
     private boolean isConnected;
@@ -18,6 +22,7 @@ public class PeerConnection {
     private Consumer<String> disconnectHandler;
     private Thread readThread;
     private Thread writeThread;
+    private long lastCleanup = System.currentTimeMillis();
 
     public PeerConnection(Socket socket, String peerId) throws IOException {
         this.socket = socket;
@@ -47,7 +52,30 @@ public class PeerConnection {
         writeThread.start();
     }
 
+    private void cleanupOldMessageIds() {
+        // Dọn dẹp các message ID cũ (trong vòng 1 phút trở lại đây)
+        long oneMinuteAgo = System.currentTimeMillis() - 60000;
+        sentMessageIds.removeIf(id -> {
+            try {
+                // ID có dạng: senderId_timestamp_hash
+                String[] parts = id.split("_");
+                if (parts.length >= 2) {
+                    long timestamp = Long.parseLong(parts[1]);
+                    return timestamp < oneMinuteAgo;
+                }
+            } catch (NumberFormatException e) {
+                // Nếu không parse được timestamp thì xóa luôn
+                return true;
+            }
+            return true;
+        });
+    }
+    
     private void readMessages() {
+        // Dọn dẹp message ID cũ mỗi phút
+        long lastCleanup = System.currentTimeMillis();
+        final long CLEANUP_INTERVAL = 60000; // 1 phút
+        
         try {
             while (isConnected) {
                 try {
@@ -110,7 +138,26 @@ public class PeerConnection {
         if (!isConnected) {
             throw new IOException("Connection to " + peerId + " is closed");
         }
+        
+        // Tạo ID duy nhất cho tin nhắn dựa trên senderId, timestamp và nội dung
+        String messageId = message.senderId + "_" + message.timestamp + "_" + 
+                         (message.data != null ? message.data.hashCode() : 0);
+        
+        // Nếu đã gửi tin nhắn này rồi thì bỏ qua
+        if (sentMessageIds.contains(messageId)) {
+            return;
+        }
+        
+        // Đánh dấu là đã gửi
+        sentMessageIds.add(messageId);
+        
+        // Thêm vào hàng đợi để gửi
         messageQueue.offer(message);
+        
+        // Dọn dẹp các message ID cũ nếu cần
+        if (System.currentTimeMillis() - lastCleanup > 60000) { // 1 phút
+            cleanupOldMessageIds();
+        }
     }
     
     /**
